@@ -1,0 +1,33 @@
+# 二进制与构建产物
+**/botc-server.exe
+**/botc-server.exe~
+**/*.exe
+**/*.log
+
+# 运行时数据（本地数据库 / 密钥配置 / 会话）
+**/botc.db
+**/*.db
+**/arena_keys.json
+**/snapshot*.json
+
+# Python
+ai_service/venv/
+ai_service/__pycache__/
+**/__pycache__/
+**/*.pyc
+ai_service/req_debug.log
+ai_service/err.txt
+
+# 毕设文档（不入库）
+*.docx
+*.pdf
+V5项目说明.md
+
+# IDE / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 临时测试脚本
+*.tmp
