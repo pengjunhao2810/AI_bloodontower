@@ -142,6 +142,16 @@
             const myNumber = ref(0);
             const pubMsgs = ref([]);
             const gameChatText = ref('');
+            // @ 提及：输入框以 @ 结尾时弹出玩家选择
+            const atMenuVisible = ref(false);
+            function onChatInput() {
+                const v = gameChatText.value || '';
+                atMenuVisible.value = !activePrivateTarget.value && v.endsWith('@');
+            }
+            function insertAt(p) {
+                gameChatText.value = (gameChatText.value || '').replace(/@$/, '') + '@#' + p.number + ' ';
+                atMenuVisible.value = false;
+            }
             const myInfo = ref({ infos: [], my_role: '?', my_team: '?' });
             const stories = ref([]);
             const nightInfo = ref(null);
@@ -493,11 +503,9 @@
                 }
                 return '';
             }
-            // 猎手公开开枪声明消息检测（特殊高亮样式）；否定式（不会开枪/不开枪）不算声明
+            // 猎手开枪只走正规渠道（🏹按钮/提名），公聊文本不再做声明检测
             function isSlayerDecl(m) {
-                if (!m || !m.content) return false;
-                if (/猎手[\s\S]{0,4}(?:不会|没有|不打算|不敢|绝不|并未|不会真的)[\s\S]*?(?:开枪|枪毙|射杀|射击)/.test(m.content)) return false;
-                return /猎手[\s\S]*?(?:开枪|枪毙|射杀|射击)/.test(m.content);
+                return false;
             }
             const phaseLabel = computed(() => {
                 const ph = game.value ? game.value.phase : 'waiting';
@@ -861,39 +869,7 @@
                     fetchUsage();
                 } catch (e) { toast(e.message, 'error'); } finally { llmBusy.value = false; }
             }
-            // 电子斗蛐蛐一键添加：8 个智谱 key（从后端 data/arena_keys.json 读取，不入库）
-            const arenaVersion = ref('flash');
-            const arenaBusy = ref(false);
-            async function fetchArenaKeys() {
-                try {
-                    const r = await api.get('/api/arena/keys');
-                    return (r.data && (r.data.keys || (r.data.data && r.data.data.keys))) || [];
-                } catch (e) { return []; }
-            }
-            async function addArenaAIs() {
-                if (arenaBusy.value) return;
-                arenaBusy.value = true;
-                const model = arenaVersion.value === 'plus' ? 'glm-4-plus' : 'glm-4-flash';
-                try {
-                    const keys = await fetchArenaKeys();
-                    if (!keys.length) {
-                        toast('未配置一键入座 Key（data/arena_keys.json），请手动添加 AI', 'error');
-                        return;
-                    }
-                    // 自动扩座位：当前人数 + 8 个 AI
-                    // 普通房间 current 含房主（房主 1 + 8 AI = 9 人局）；
-                    // 斗蛐蛐房主不计入，current 即 AI 数（0 + 8 = 8 人局）
-                    const current = room.value ? room.value.player_count : 0;
-                    await WS.send('room.set_seats', { room_code: roomCode.value, max_players: Math.min(current + keys.length, 12) });
-                    for (const key of keys) {
-                        await WS.send('room.add_ai', {
-                            room_code: roomCode.value, ai_type: 'api', api_key: key,
-                            base_url: 'https://open.bigmodel.cn/api/paas/v4', model,
-                        });
-                    }
-                    toast('已一键入座 ' + keys.length + ' 个智谱 ' + model + ' AI', 'success');
-                } catch (e) { toast(e.message, 'error'); } finally { arenaBusy.value = false; }
-            }
+            // 一键入座 8 智谱 AI 已移除（Key 外置方案废弃）；添加 AI 走上方单座添加
             const roomAIList = computed(() => {
                 if (!room.value || !room.value.players) return [];
                 return room.value.players.filter(p => p.is_ai);
@@ -1090,6 +1066,7 @@
                 }
                 const txt = gameChatText.value.trim();
                 if (!txt) return;
+                atMenuVisible.value = false;
                 // 挂起中：纯数字序列（如"2 5"）→ 解析为夜晚行动选择提交
                 const activeTip = pubMsgs.value.find(m => m.nightTip && m.nightTip.active);
                 if (activeTip) {
@@ -1228,6 +1205,19 @@
                 return null;
             }
             // 左侧玩家列表点击：私聊阶段 → 邀请/进入私聊；提名阶段 → 提名
+            // 猜角色标注：真人玩家点击座位（公聊/提名阶段）给自己记录猜测
+            const guessLabels = ref({});
+            const guessMenuFor = ref(null);
+            function openGuessMenu(p) {
+                guessMenuFor.value = p;
+            }
+            function setGuess(role) {
+                if (guessMenuFor.value) {
+                    if (role === 'clear') delete guessLabels.value[guessMenuFor.value.number];
+                    else guessLabels.value[guessMenuFor.value.number] = role;
+                }
+                guessMenuFor.value = null;
+            }
             function clickPlayer(p) {
                 const ph = game.value && game.value.phase;
                 if (!p.alive && ph !== 'private_chat') { toast('该玩家已死亡', 'info'); return; }
@@ -1243,6 +1233,8 @@
                     return;
                 }
                 if (ph === 'nomination') { nominate(p.number); return; }
+                // 公聊/白天：点击座位打开猜角色标注菜单
+                if (ph === 'public_chat' || ph === 'day') { openGuessMenu(p); return; }
                 toast('当前阶段不可操作', 'info');
             }
             async function nominate(num) {
@@ -1566,23 +1558,25 @@
                 html += '<p><b>房间：</b>' + esc(r.room_code) + '　<b>共</b> ' + esc(r.day) + ' <b>天</b>　<b>胜利方：</b>'
                     + (r.winner === 'good' ? '善良阵营' : '邪恶阵营')
                     + '<br/><b>开始时间：</b>' + esc(r.started_at || '') + '</p>';
-                html += '<h2>一、角色状态</h2><ul>';
+                html += '<h2>一、说书人复盘（AI）</h2>';
+                html += r.recap ? '<p>' + esc(r.recap) + '</p>' : '<p>（生成中或不可用）</p>';
+                html += '<h2>二、角色状态</h2><ul>';
                 for (const pl of pls) {
                     html += '<li>#' + esc(pl.number) + ' ' + esc(pl.username || '') + ' — '
                         + esc(pl.role === 'drunk' ? '酒鬼' : (pl.role_name || ''))
                         + '（' + (pl.alive ? '存活' : '死亡') + '）</li>';
                 }
                 html += '</ul>';
-                html += '<h2>二、技能与说书人记录</h2>';
+                html += '<h2>三、技能与说书人记录</h2>';
                 const stKeys = Object.keys(r.stories || {});
                 if (stKeys.length) {
                     for (const k of stKeys) for (const st of (r.stories[k] || [])) html += '<p>#' + esc(k) + '：' + esc(st) + '</p>';
                 } else html += '<p>（无）</p>';
-                html += '<h2>三、公聊记录</h2>';
+                html += '<h2>四、公聊记录</h2>';
                 for (const m of (r.messages || [])) {
                     html += '<p>' + (m.system ? '<b style="color:#b8860b;">[系统]</b> ' : '<b>#' + esc(m.number) + '：</b>') + esc(m.content) + '</p>';
                 }
-                html += '<h2>四、私聊记录</h2>';
+                html += '<h2>五、私聊记录</h2>';
                 if ((r.private_msgs || []).length) {
                     for (const pm of r.private_msgs) {
                         html += '<p><b>#' + esc(pm.from) + ' → #' + esc(pm.to) + '</b>（第 ' + ((pm.day || 0) + 1) + ' 天）：' + esc(pm.content) + '</p>';
@@ -1644,7 +1638,6 @@
             });
             // ——— 提名投票事件 ———
             let voteCountdownTimer = null;
-            let cooldownTimer = null;
             function startVoteCountdown() {
                 if (voteCountdownTimer) clearInterval(voteCountdownTimer);
                 const tick = () => {
@@ -1728,56 +1721,16 @@
                 scrollMsgs();
             });
             WS.on('game.vote_result', (d) => {
-                // 标记投票卡片完成 + 说书人结果卡片（同意票数/参与人数/各玩家投票情况）
+                // 结果文本由后端系统消息进时间轴；此处只标记投票卡片完成并停止倒计时
                 for (const m of pubMsgs.value) {
                     if (m.voteCard && !m.voteCard.done) m.voteCard.done = true;
                 }
                 if (voteCountdownTimer) clearInterval(voteCountdownTimer);
-                pubMsgs.value.push({
-                    id: 'vr' + (++tipSeq),
-                    number: 0, system: true,
-                    content: '📢 投票结束：#' + d.target + ' 同意 ' + d.yes + ' 票',
-                    voteResultCard: {
-                        target: d.target,
-                        yes: d.yes,
-                        abstain: d.abstain || 0,
-                        voted: d.voted || 0,
-                        unvoted: d.unvoted || 0,
-                        yes_nums: d.yes_nums || [],
-                        unvoted_nums: d.unvoted_nums || [],
-                        votes: d.votes || {},
-                        message: d.message || '',
-                        cooldownLeft: d.cooldown || 30,
-                    },
-                });
-                // 提名窗口倒计时（卡片内展示）
-                if (cooldownTimer) clearInterval(cooldownTimer);
-                const cdTick = () => {
-                    let any = false;
-                    for (const m of pubMsgs.value) {
-                        if (m.voteResultCard && m.voteResultCard.cooldownLeft > 0) {
-                            any = true;
-                            m.voteResultCard.cooldownLeft--;
-                        }
-                    }
-                    if (!any) clearInterval(cooldownTimer);
-                };
-                cdTick();
-                cooldownTimer = setInterval(cdTick, 1000);
                 scrollMsgs();
             });
             WS.on('game.nominate_result', (d) => {
                 voteInfo.value = null;
-                // 处决判定系统卡片（周期结束统一比对结果）
-                pubMsgs.value.push({
-                    id: 'nrr' + (++tipSeq),
-                    number: 0, system: true,
-                    content: d.executed ? '⚖️ 处决：' + d.message : '⚖️ 提名结束：' + (d.message || ''),
-                    nominateResultCard: {
-                        executed: d.executed,
-                        message: d.message || '',
-                    },
-                });
+                // 处决/提名结束：文本由后端系统消息进时间轴，前端不再 push 重复卡片
                 scrollMsgs();
             });
             // ——— 私聊事件 ———
@@ -1902,12 +1855,12 @@
                 slayerDialog, slayerTarget, mySlayerUsable, openSlayerDialog, confirmSlayerShoot,
                 layoutMode, toggleLayout, circlePlayers, roomCirclePlayers, measureCircleArea,
                 recording, startVoice,
-                arenaVersion, arenaBusy, addArenaAIs,
                 sendRoomMsg, toggleReady, addAI, removeAI, kickPlayer, fillBots, setSeats, startGame, leaveRoom,
                 fillAndStart,
                 llmDialog, llmPresets, llmForm, llmModelOptions, openLlmDialog, pickLlmPreset, confirmAddLlmAI, usage, roomUsage, fetchUsage, fmtTokens, llmBusy, pingLlm, pingResult, roomAIList, humanList,
                 aiCount: (r) => r.players.filter(p => p.is_ai).length,
-                sendGameMsg, nextPhase, nominate, endGame, backToRoom,
+                sendGameMsg, nextPhase, nominate, endGame, backToRoom, atMenuVisible, onChatInput, insertAt,
+                guessLabels, guessMenuFor, openGuessMenu, setGuess,
                 clickPlayer, copyRoomLink,
                 openFriendPanel, refreshFriendList, doFriendSearch, sendFriendRequest,
                 acceptFriend, rejectFriend, removeFriend,

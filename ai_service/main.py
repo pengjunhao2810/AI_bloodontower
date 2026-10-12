@@ -29,7 +29,7 @@ app = Flask(__name__)
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-HTTP_TIMEOUT = float(os.environ.get("AI_HTTP_TIMEOUT", "90"))
+HTTP_TIMEOUT = float(os.environ.get("AI_HTTP_TIMEOUT", "38"))  # 必须小于 Go 客户端 40 秒超时，否则 Go 放弃后请求仍占信号量引发死锁雪崩
 
 # ====================================================================
 # 一、全局底线（只保留 3 条游戏底线，其余全部放权给模型自由发挥）
@@ -91,7 +91,7 @@ _ROLE_GUIDES = {
     "小恶魔": "技能：每晚杀一人；必要时可自杀传刀给爪牙。策略：优先击杀强信息位。",
     "红唇女郎": "技能：存活人数不少于5时恶魔死亡，你成为小恶魔。策略：保持低调，随时准备接刀。",
     "男爵": "技能：场上多出2名外来者（替换2名镇民）。策略：扰乱外来者数量，可伪装外来者。",
-    "下毒者": "技能：每晚毒一人，其技能失效信息可能出错。策略：重点毒强信息位。",
+    "投毒者": "技能：每晚毒一人，其技能失效信息可能出错。策略：重点毒强信息位。",
     "间谍": "技能：可查看魔典（知道全场每个玩家的真实角色）。策略：私聊把魔典完整告诉恶魔——谁在什么位置、谁是威胁最大的信息位，让恶魔据此定刀人顺序；自己伪装强信息位、帮恶魔伪装镇长等功能位。",
 }
 
@@ -105,7 +105,7 @@ _EVIL_PLAYBOOK = {
     "小恶魔": "你是邪恶阵营指挥官：每晚杀一人，优先击杀强信息位。",
     "红唇女郎": "恶魔死亡后你接任小恶魔：前期低调接刀。",
     "男爵": "场上多出2个外来者：可利用数量差搅局。",
-    "下毒者": "每晚毒一人：重点毒强信息位。",
+    "投毒者": "每晚毒一人：重点毒强信息位。",
 }
 
 # 恶魔指挥义务（最高优先级）
@@ -132,8 +132,8 @@ _EVIL_TEAM_RULES = (
 
 # 按角色专属战术
 _EVIL_ROLE_TACTICS = {
-    "男爵": "可暗示外来者数量不对来引导好人内耗。每轮公聊至少主动提及一次外来者数量问题，主动制造新的争议点，禁止全程跟着好人的话题走。",
-    "下毒者": "毒真信息位后，伪装同身份报相反信息反问对方是否被下毒。",
+    "男爵": "引导好人关注外来者数量问题制造内耗，但绝不能说'因为我的存在导致外来者变多'——这会暴露你的男爵身份，只能含糊质疑数量不对。",
+    "投毒者": "毒真信息位后，伪装同身份报相反信息反问对方是否被下毒。",
 }
 
 # 对好人的伪装技巧
@@ -145,7 +145,10 @@ _EVIL_FRAUD_TACTICS = (
 # 四、好人阵营协作逻辑（压缩版）
 # ====================================================================
 _GOOD_TEAM_LOGIC = (
-    "好人不必全盘托出，避免被恶魔夜刀；信息矛盾时考虑醉酒/中毒；票型异常可作为线索。"
+    "这个板子的核心不是保住每个好人，而是盘出恶魔的伪装路线并消灭恶魔——"
+    "票错好人、夜里死人都可以接受，处决本身就是获取信息的手段（被处决者的角色会被验证、票型暴露立场）。"
+    "死者的信息要甄别后再用：身份已被确认是好人的死者，其生前发言可信度高；"
+    "但爪牙或恶魔死后仍会撒谎（临死反咬好人、留下误导信息），未知身份的死者发言必须打折。"
     "信息冲突时，优先相信有完整技能逻辑链的一方，而不是说的人多的一方；"
     "禁止仅凭'过早明牌可疑'这类主观理由投票，必须绑定具体的信息矛盾点。"
 )
@@ -234,20 +237,25 @@ def _notes_text(room, number):
     return "【你的记忆】" + "；".join(parts)
 
 # 从发言中提取声称身份，更新结构化笔记
-def _extract_identity_update(room, number, reply):
+def _extract_identity_update(room, number, reply, team, phase):
+    """只提取'我是XX'明确自称写进公开身份；
+    绝不复述别人提到的角色名（否则引用'#2 这个假占卜师'会把'占卜师'错记成自己的身份）；
+    邪恶方公开自称的真实角色名不记录（他们永远在伪装）"""
+    m = re.search(r"我是(?:一名|一个|真正的|的)?(?:玩家)?(?:，|,|：|:|\s)?([\u4e00-\u9fa5]{2,4})", reply)
+    if not m:
+        return
+    found = m.group(1).strip("，。,：: 的")
     idents = ["洗衣妇", "占卜师", "厨师", "共情者", "调查员", "图书管理员", "僧侣", "镇长",
               "士兵", "送葬者", "猎手", "守鸦人", "贞洁者", "圣徒", "管家", "陌客",
-              "小恶魔", "红唇女郎", "男爵", "下毒者", "酒鬼"]
-    found = None
-    for ident in idents:
-        if ident in reply:
-            found = ident
-            break
-    if found:
-        n = _get_notes(room, number)
-        with _NOTES_LOCK:
-            if not n["identity"]:
-                n["identity"] = found
+              "小恶魔", "红唇女郎", "男爵", "投毒者", "酒鬼"]
+    if found not in idents:
+        return
+    if team in ("minion", "demon") and found in ("小恶魔", "红唇女郎", "男爵", "投毒者"):
+        return
+    n = _get_notes(room, number)
+    with _NOTES_LOCK:
+        if not n["identity"]:
+            n["identity"] = found
 
 # ====================================================================
 # 结构化判断记忆：发言后提炼"怀疑谁/信任谁"持续写回笔记（Samuel 建议的核心缺口）
@@ -263,7 +271,7 @@ def _update_structured_notes(room, number, reply, context, llm_conf):
         f"2)你当前最信任谁（编号+简短理由，没有就写'无'）。"
         f"严格按这个格式输出，不要多余内容：\n怀疑：...\n信任：..."
     )
-    result = _ask_deepseek([
+    result = _ask_deepseek_async([
         {"role": "system", "content": "只输出两行：怀疑：xxx 和 信任：xxx。"},
         {"role": "user", "content": prompt},
     ], llm_conf, temperature=0.3, max_tokens=120, room_code=room)
@@ -306,7 +314,7 @@ def _summarize_private(room, number, other_num, context, llm_conf):
         f"对方声称的身份、对方提供的关键信息（含编号数字）、你们的约定或战术。"
         f"只输出总结本身，用第一人称。"
     )
-    summary = _ask_deepseek([
+    summary = _ask_deepseek_async([
         {"role": "system", "content": "只输出一句话总结。"},
         {"role": "user", "content": prompt},
     ], llm_conf, temperature=0.3, max_tokens=120, room_code=room)
@@ -322,7 +330,7 @@ def _summarize_private(room, number, other_num, context, llm_conf):
             del arr[: len(arr) - 4]
 
 def _chat_summary_text(room, number, other_num=None):
-    """注入用：私聊时给当前对象的总结；公聊时给所有对象的最新总结"""
+    """注入用：私聊时给当前对象的总结；公聊时给所有对象的最新总结+每日压缩总结"""
     n = _get_notes(room, number)
     with _NOTES_LOCK:
         summaries = n.get("summaries", {})
@@ -332,27 +340,64 @@ def _chat_summary_text(room, number, other_num=None):
                 return "【你和 #%s 的私聊记忆】%s" % (other_num, "；".join(arr[-3:]))
         else:
             parts = []
+            for k, arr in list(summaries.items()):
+                if k.startswith("day_") and arr:
+                    parts.append("第%s天总结：" % k[4:] + arr[-1])
             for k, arr in list(summaries.items())[-4:]:
-                if arr:
+                if not k.startswith("day_") and arr:
                     parts.append("与#" + k + "：" + arr[-1])
             if parts:
                 return "【你的私聊记忆·仅内部参考，不得公开说出】" + "；".join(parts)
     return ""
+
+# 每日总结压缩：跨天时把前一天笔记压缩成一段总结（防长局笔记溢出、丢早期推理）
+_NOTES_DAY = {}  # (room, number) -> 最后处理的天数
+
+def _maybe_compress_day(room, number, day, llm_conf):
+    key = (str(room), str(number))
+    with _NOTES_LOCK:
+        last = _NOTES_DAY.get(key, -1)
+        if day <= last:
+            return
+        _NOTES_DAY[key] = day
+        prev = last
+        if prev < 0:
+            return
+        n = _get_notes(room, number)
+        old_logs = [l for l in n["log"] if l.startswith("[D%d]" % (prev + 1))]
+    if not old_logs:
+        return
+    threading.Thread(
+        target=_compress_day_logs,
+        args=(room, number, prev + 1, list(old_logs), llm_conf),
+        daemon=True,
+    ).start()
+
+def _compress_day_logs(room, number, day_no, logs, llm_conf):
+    hist = "；".join(logs[-30:])
+    prompt = (
+        f"你是玩家#{number}，这是你第{day_no}天的笔记流水：{hist}。"
+        f"用 2-3 句话总结这一天：你获得的关键信息、你的怀疑对象和理由、你采取的行动。"
+        f"只输出总结本身。"
+    )
+    summary = _ask_deepseek_async([
+        {"role": "system", "content": "只输出总结。"},
+        {"role": "user", "content": prompt},
+    ], llm_conf, temperature=0.3, max_tokens=220, room_code=room)
+    if not summary:
+        return
+    n = _get_notes(room, number)
+    with _NOTES_LOCK:
+        n.setdefault("summaries", {})
+        arr = n["summaries"].setdefault("day_%d" % day_no, [])
+        arr.append(summary)
+        n["summaries"]["day_%d" % day_no] = arr[-2:]
 
 # ====================================================================
 # 七、LLM 调用（温度分级 + max_tokens 220 + token 用量统计）
 # ====================================================================
 _USAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "usage.json")
 _USAGE_LOCK = threading.Lock()
-_USAGE = {}  # room_code -> {model: {"prompt": n, "completion": n, "total": n, "calls": n}}
-
-def _load_usage():
-    global _USAGE
-    try:
-        with open(_USAGE_FILE, "r", encoding="utf-8") as f:
-            _USAGE = json.load(f) or {}
-    except Exception:
-        _USAGE = {}
 
 def _save_usage():
     with _USAGE_LOCK:
@@ -361,21 +406,6 @@ def _save_usage():
                 json.dump(_USAGE, f, ensure_ascii=False)
         except Exception:
             pass
-
-def _record_usage(room_code, info):
-    if not info:
-        return
-    prompt = int(info.get("prompt_tokens", 0) or 0)
-    completion = int(info.get("completion_tokens", 0) or 0)
-    model = info.get("model", "unknown")
-    with _USAGE_LOCK:
-        room = _USAGE.setdefault(str(room_code), {})
-        m = room.setdefault(model, {"prompt": 0, "completion": 0, "total": 0, "calls": 0})
-        m["prompt"] += prompt
-        m["completion"] += completion
-        m["total"] += prompt + completion
-        m["calls"] += 1
-    _save_usage()
 
 def _resolve_llm(llm_conf):
     key, base, model = "", "", ""
@@ -451,14 +481,46 @@ def _ask_deepseek(messages, llm_conf="", temperature=0.8, max_tokens=220, room_c
     if not _LLM_SEM.acquire(timeout=40):
         return None
     try:
-        return _ask_deepseek_locked(messages, url, key, model, temperature, max_tokens, room_code)
+        reply = _ask_deepseek_locked(messages, url, key, model, temperature, max_tokens, room_code)
+        _trace_llm(room_code, model, messages, reply)
+        return reply
     finally:
         _LLM_SEM.release()
+
+# LLM 轨迹记录（BOTC_TRACE=1 时启用）：完整记录每次调用的 prompt 与回复，用于调试复读/幻觉
+_TRACE_ON = os.environ.get("BOTC_TRACE", "") in ("1", "true", "on")
+_TRACE_LOCK = threading.Lock()
+
+def _trace_llm(room_code, model, messages, reply):
+    if not _TRACE_ON:
+        return
+    try:
+        with _TRACE_LOCK:
+            with open("trace.log", "a", encoding="utf-8") as f:
+                f.write("\n=== %s | room=%s | model=%s ===\n" % (time.strftime("%H:%M:%S"), room_code, model))
+                for m in messages:
+                    f.write("[%s] %s\n" % (m.get("role"), str(m.get("content"))[:600]))
+                f.write("[assistant] %s\n" % (reply or "<空>")[:600])
+    except Exception:
+        pass
 
 def _ask_deepseek_locked(messages, url, key, model, temperature, max_tokens, room_code):
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     # 尝试序列：默认参数 → 强制 temperature=1（部分推理模型只接受 1）→ 加大输出上限（推理模型思考消耗大）
     attempts = [(temperature, max_tokens)]
+
+# 异步记忆线程专用调用：抢不到 LLM 配额就放弃（5 秒），绝不阻塞主请求路径
+# （提名决策/投票决策/发言生成等关键请求使用 _ask_deepseek 的 40 秒窗口）
+def _ask_deepseek_async(messages, llm_conf="", temperature=0.3, max_tokens=220, room_code=""):
+    url, key, model = _resolve_llm(llm_conf)
+    if not url or not key:
+        return None
+    if not _LLM_SEM.acquire(timeout=5):
+        return None
+    try:
+        return _ask_deepseek_locked(messages, url, key, model, temperature, max_tokens, room_code)
+    finally:
+        _LLM_SEM.release()
     if abs(temperature - 1.0) > 0.01:
         attempts.append((1.0, max_tokens))
     attempts.append((1.0, max_tokens * 3))
@@ -565,6 +627,18 @@ def _sanitize_reply(reply, team="", phase=""):
     # 非游戏术语强制替换（弱模型发明"卧底/内鬼"等词）
     r = r.replace("卧底", "爪牙").replace("内鬼", "爪牙").replace("狼人", "爪牙")
     return r
+
+# 善良阵营玩家自称邪恶词汇（"我是爪牙/我是卧底"等编造性自曝）——整条替换
+_GOOD_EXPOSE_PATTERNS = [
+    "我是卧底", "我是爪牙", "我是内鬼", "我是狼人", "我是邪恶", "我是恶魔",
+    "我是邪恶阵营", "我是坏的", "我的身份是爪牙", "我的身份是恶魔",
+    "我承认我是爪牙", "我承认我是恶魔",
+]
+
+def _good_self_expose(reply, team):
+    if team not in ("townsfolk", "outsider"):
+        return False
+    return any(p in reply for p in _GOOD_EXPOSE_PATTERNS)
 
 # 邪恶方公聊自爆关键词（弱模型把角色说明/阵营背到公聊）
 _EVIL_EXPOSE_WORDS = [
@@ -732,6 +806,7 @@ def api_speak():
     room_code = d.get("room_code", "default")
 
     _record_observations(room_code, number, context, my_clues, day)
+    _maybe_compress_day(room_code, number, day, llm_conf)
     notes_str = _notes_text(room_code, number)
 
     alive_str = ",".join(str(n) for n in alive_nums)
@@ -756,7 +831,11 @@ def api_speak():
 
     # ——— 第一层：阵营核心目标（最高优先级） ———
     if team in ("townsfolk", "outsider"):
-        core = f"【最高优先级·阵营目标】你是{role_name}，善良阵营，目标是找出并消灭恶魔与爪牙，保护好人。"
+        core = (
+            f"【最高优先级·阵营目标】你是{role_name}，善良阵营。"
+            f"获胜条件：恶魔死亡（场上不再有存活的小恶魔），善良阵营立即获胜。"
+            f"你的目标是找出并消灭恶魔与爪牙，保护好人。"
+        )
         team_logic = get_good_team_logic(role_name)
     elif team in ("minion", "demon"):
         core = f"【最高优先级·阵营目标】你是{role_name}，邪恶阵营，目标是隐藏身份活到最后，杀光好人。你必须服从邪恶方协同作战体系。"
@@ -808,8 +887,8 @@ def api_speak():
                 if team == "demon":
                     mate_note = (
                         f"对方 #{other_num} 是你的爪牙，自己人。直接谈事："
-                        f"必须先给他分配一个伪装身份（用你掌握的不在场镇民名单，确保不与其他人撞车），"
-                        f"然后下达本轮指令（抗推谁/谁带队/谁隐身）、同步刀人计划。"
+                        f"把你掌握的不在场镇民名单全部列出来（一般三个），让爪牙自己挑一个作为伪装身份，"
+                        f"你们两个讨论决定谁用哪个、确保不撞车；然后下达本轮指令（抗推谁/谁带队/谁隐身）、同步刀人计划。"
                     )
                 else:
                     mate_note = (
@@ -842,6 +921,8 @@ def api_speak():
             style = (
                 f"【私聊】和 #{other_num} 一对一私聊。"
                 f"有信息就说，没有就说没有；试探对方身份、交换信息。"
+                f"你之前说过的话记在'我说过'的记忆里：不要复述已经说过的内容，"
+                f"只回应对方的新内容；对方如果只是确认'好的/收到'，不必再回应。"
                 f"说话前三思：如果没新东西可说，就说'就聊到这里吧，我找别人聊聊'这类收尾话结束对话，"
                 f"不要为说话而说话、不要重复。"
                 f"严禁虚构对方的发言或身份（如'你自称XX''你在公聊说XX'）——"
@@ -857,11 +938,17 @@ def api_speak():
         temp = 0.7
     else:
         style = (
-            f"【公聊】你是真实桌游玩家。"
-            f"说点新的：你的信息、新的怀疑或投票建议，两三句话说清楚就好，别长篇大论。"
-            f"别人说过的不必重复；不要跟着多数人怀疑，要有自己的依据；不要公开私聊内容。"
-            f"发言前想一想：你是否有值得说的新信息、需要配合的操作或战术？"
-            f"如果都没有，就只输出【沉默】两个字，安静观察别人的发言并自己思考，不要硬凑发言。"
+            f"【公聊】你是真实桌游玩家，发言一定要简洁，两三句以内。只有三种情况才开口："
+            f"1.报信息：'我是洗衣妇，我得知#4和#8中有一人是猎手'——身份+技能结果一句话说完；"
+            f"2.保留：'我的身份暂时不想透露，过几晚再看，先看看场上信息'——直接说明不报，不绕弯子；"
+            f"3.推理：把场上多个公开信息串成链条交叉印证——"
+            f"例如'调查员得知#6和#3中有一个投毒者，而#2共情者报相邻有1个邪恶，"
+            f"那#1极大可能是投毒者，今天可以把#1投出去'——"
+            f"用信息的互相印证锁定嫌疑位置，这才是真正有价值的推理。"
+            f"如果有人发言里带 @#你的编号，说明你被点名了，下一轮轮到你时优先回应他。"
+            f"别人说过的不必重复；不要跟着多数人怀疑；不要公开私聊内容。"
+            f"严禁虚构别人的发言——不能编造'某玩家说过XX'，只能引用公聊里真听到的原话；拿不准就说是你的怀疑而非事实。"
+            f"没有以上任何内容可讲，就只输出【沉默】两个字，安静观察并自己思考，不要硬凑发言。"
         )
         if team in ("minion", "demon"):
             style += (
@@ -938,26 +1025,29 @@ def api_speak():
         stripped = reply.strip().strip("。！!.,， ")
         if stripped in ("沉默", "【沉默】", "我沉默", "我选择沉默", "先沉默", "我保持沉默", "暂时沉默"):
             return jsonify({"reply": "", "silent": True})
-    # 重复发言检测（公聊+私聊通用）：
-    # 1) 与本人最近 3 条发言相似 >0.55 则沉默（禁止复读自己的车轱辘话）
-    # 2) 与对方最近的消息相似 >0.7 则沉默（禁止复读别人刚说的话，弱模型常把对方的话原样背一遍）
+    # 重复发言检测（公聊+私聊通用，按阶段隔离——私聊报过的信息公聊再报是正常行为，不拦）：
+    # 1) 与本人最近 3 条同阶段发言相似 >0.45 则沉默（复读自己的车轱辘话）
+    # 2) 与对方最近的消息相似 >0.6 则沉默（禁止复读别人刚说的话）
     n = _get_notes(room_code, number)
-    my_saids = [log_line[len("我说过："):] for log_line in reversed(n["log"])
-                if log_line.startswith("我说过：")][:3]
+    my_saids = [log_line[len("我说过[%s]：" % phase):] for log_line in reversed(n["log"])
+                if log_line.startswith("我说过[%s]：" % phase)][:3]
     for last_said in my_saids:
         sim = difflib.SequenceMatcher(None, reply, last_said).ratio()
-        if sim > 0.55:
+        if sim > 0.45:
             return jsonify({"reply": "", "silent": True, "duplicate": True})
     recent_others = [str(m.get("content", "")) for m in context[-4:]
                      if str(m.get("num")) not in ("0", str(number)) and m.get("content")]
     for oc in recent_others:
-        if len(oc) > 10 and difflib.SequenceMatcher(None, reply, oc).ratio() > 0.7:
+        if len(oc) > 10 and difflib.SequenceMatcher(None, reply, oc).ratio() > 0.6:
             return jsonify({"reply": "", "silent": True, "duplicate": True})
     # 邪恶方公聊自爆兜底：检测到真实身份/阵营/战术泄露，整条换成安全发言
     if _evil_self_expose(reply, team, phase):
         reply = random.choice(_FALLBACK_PUBLIC_EVIL)
-    _extract_identity_update(room_code, number, reply)
-    _add_log(room_code, number, f"我说过：{reply[:150]}", day)
+    # 善良玩家编造性自曝（"我是爪牙/我是卧底"）：毫无逻辑的幻觉，整条换成安全发言
+    if _good_self_expose(reply, team):
+        reply = random.choice(_FALLBACK_PUBLIC)
+    _extract_identity_update(room_code, number, reply, team, phase)
+    _add_log(room_code, number, f"我说过[{phase}]：{reply[:150]}", day)
     # 异步结构化记忆：提炼"怀疑/信任"对象写回笔记（不阻塞回复返回）
     snap_ctx = [dict(m) for m in context[-8:]]
     threading.Thread(
@@ -1014,10 +1104,21 @@ def api_decide():
             dead_note = (
                 f"注意：你已死亡，本票是你的死亡票，只有这一张，用完即作废。"
             )
+        role_note = ""
+        if role_name == "管家":
+            role_note = (
+                f"你是管家：你的主人编号在私密信息里。主人投赞成你才能投赞成，"
+                f"主人没投赞成（弃权或投别人）你就只能弃权，你的赞成票不会被计入。"
+            )
+        if role_name == "小恶魔":
+            role_note = (
+                f"你是恶魔：绝不能投自己的爪牙，也绝不能在推理中暴露你的恶魔身份。"
+            )
         prompt = (
             f"你是《血染钟楼·暗流涌动》里的{role_name}。"
             f"当前正在投票：#{vote_from} 提名了 #{vote_target}。"
             f"{dead_note}"
+            f"{role_note}"
             f"{guide}"
             f"{clue_str}"
             f"{notes_str}"
@@ -1077,11 +1178,18 @@ def api_decide():
     if not candidates:
         return jsonify({"choice": None})
 
+    evil_note = ""
+    if role_name == "小恶魔":
+        evil_note = (
+            f"你是恶魔：你的爪牙编号在私密信息里。绝不允许选择你的爪牙作为击杀目标——"
+            f"除非你已与爪牙明确约定战术自杀/传位。若候选里有你的爪牙，直接排除。"
+        )
     prompt = (
         f"你是《血染钟楼·暗流涌动》里的{role_name}，能力：{ability}。"
         f"{guide}"
         f"{clue_str}"
         f"{notes_str}"
+        f"{evil_note}"
         f"结合身份立场仔细思考多层逻辑：好人优先指向高嫌疑目标；"
         f"邪恶方选择击杀/下毒目标时优先杀害高嫌疑好人，绝对不要选择邪恶队友。"
         f"候选玩家编号: {candidates}。"
@@ -1114,6 +1222,32 @@ def api_decide():
         _add_log(room_code, str(self_num), f"我选择 #{choice}，推理：{reply[:80]}")
         return jsonify({"choice": choice, "reasoning": reply[:200]})
     return jsonify({"choice": random.choice(candidates)})
+
+# ====================================================================
+# 赛后复盘（对局结束后说书人视角回顾）
+# ====================================================================
+@app.route("/api/recap", methods=["POST"])
+def api_recap():
+    d = request.get_json(force=True, silent=True) or {}
+    room_code = d.get("room_code", "default")
+    winner = d.get("winner", "?")
+    players = d.get("players", []) or []
+    msgs = d.get("messages", []) or []
+    llm_conf = d.get("llm_conf", "")
+    roles = "，".join("#%s=%s" % (p.get("number"), p.get("role_name")) for p in players)
+    pub = "；".join("#%s: %s" % (m.get("num"), str(m.get("content", ""))[:60]) for m in msgs[-25:])
+    prompt = (
+        f"你是一场《血染钟楼·暗流涌动》对局的说书人。对局已结束，胜利方：{winner}。"
+        f"全场角色：{roles}。"
+        f"公聊节选：{pub}。"
+        f"请写一段 150-250 字的赛后复盘：邪恶方是如何运作的、善良方犯了什么关键错误、"
+        f"本局最重要的转折点是什么。用说书人口吻，只输出复盘正文。"
+    )
+    recap = _ask_deepseek([
+        {"role": "system", "content": "你是说书人，只输出复盘正文。"},
+        {"role": "user", "content": prompt},
+    ], llm_conf, temperature=0.6, max_tokens=500, room_code=room_code)
+    return jsonify({"recap": recap or ""})
 
 if __name__ == "__main__":
     # threaded=True 关键：游戏里 5 个 AI 同时请求（私聊/公聊/夜晚决策），

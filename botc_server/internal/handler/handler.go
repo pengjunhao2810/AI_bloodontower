@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"math/rand"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,22 +20,7 @@ import (
 
 func itoa(n int) string { return strconv.Itoa(n) }
 
-// ArenaKeys 电子斗蛐蛐一键入座的 API Key 列表
-// 从 data/arena_keys.json 读取（该文件不入库；仓库提供 arena_keys.example.json 占位）
-func (h *Handler) ArenaKeys(c *gin.Context) {
-	if CurrentUser(c, h.DB) == nil {
-		Fail(c, 401, "未登录")
-		return
-	}
-	raw, err := os.ReadFile(filepath.Join("data", "arena_keys.json"))
-	if err != nil {
-		OK(c, gin.H{"keys": []string{}})
-		return
-	}
-	var keys []string
-	_ = json.Unmarshal(raw, &keys)
-	OK(c, gin.H{"keys": keys})
-}
+func randIntn(n int) int { return rand.Intn(n) }
 
 // Handler 聚合依赖：HTTP 层只做认证与建房，实时交互全部走 WS → 房间 Actor
 type Handler struct {
@@ -318,6 +301,7 @@ func (h *Handler) GameReplay(c *gin.Context) {
 		"actions":      json.RawMessage(log.Actions),
 		"private_msgs": json.RawMessage(log.PrivateMsgs),
 		"stories":      json.RawMessage(log.Stories),
+		"recap":        log.Recap,
 	})
 }
 

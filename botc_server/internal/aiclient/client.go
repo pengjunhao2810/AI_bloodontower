@@ -161,6 +161,24 @@ func (c *Client) DecidePrivateAccept(roomCode, roleName string, fromNum int, ali
 	return resp.Accept, true
 }
 
+// Recap 赛后复盘：说书人视角回顾整局（角色分布+公聊节选）
+func (c *Client) Recap(roomCode, winner string, players []map[string]any, msgs []map[string]any, llmConf string) (string, bool) {
+	payload := map[string]any{
+		"room_code": roomCode,
+		"winner":    winner,
+		"players":   players,
+		"messages":  msgs,
+		"llm_conf":  llmConf,
+	}
+	var resp struct {
+		Recap string `json:"recap"`
+	}
+	if err := c.post("/api/recap", payload, &resp); err != nil {
+		return "", false
+	}
+	return resp.Recap, resp.Recap != ""
+}
+
 // Ping 连通性测试：用给定 LLM 配置调一次模型，返回结果详情（添加 AI 前校验 Key）
 func (c *Client) Ping(llmConf string) (map[string]any, bool) {
 	payload := map[string]any{"llm_conf": llmConf}

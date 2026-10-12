@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -67,8 +65,15 @@ type PrivateMsg struct {
 
 const aiReplyCooldown = 8 * time.Second
 
-// 猎手开枪声明匹配：发言中出现"猎手"+"开枪/枪毙/射杀/射击"+"编号"
-var slayerRe = regexp.MustCompile(`猎手[^，。\n]*?(?:开枪|枪毙|射杀|射击)[^，。\n]*?#?\s*(\d+)`)
+// BalancedBoards 5 组 8 人均衡配板（暗流涌动专业配板，斗蛐蛐观战随机轮转使用）
+// 每组保证：信息位/功能位/干扰位配比均衡，邪恶方组合覆盖 4 种爪牙
+var BalancedBoards = [][]string{
+	{"imp", "poisoner", "recluse", "washerwoman", "chef", "empath", "monk", "soldier"},
+	{"imp", "spy", "saint", "librarian", "fortune_teller", "mayor", "butler", "slayer"},
+	{"imp", "scarlet_woman", "drunk", "investigator", "ravenkeeper", "virgin", "soldier", "chef"},
+	{"imp", "baron", "recluse", "saint", "drunk", "washerwoman", "chef", "soldier"},
+	{"imp", "spy", "saint", "chef", "empath", "mayor", "virgin", "slayer"},
+}
 
 // Post 投事件（非阻塞，?HTTP/WS 层调甼
 func (r *Room) Post(ev Event) {
@@ -254,7 +259,13 @@ func (r *Room) handle(ev Event) {
 	case "ai_private_accept_resolve":
 		r.onAIPrivateAcceptResolve(ev)
 	case "ai_private_silence":
-		r.setSilence(toInt(ev.Data["number"]), toInt(ev.Data["to_number"]))
+		// AI 自然收尾：AI↔AI 会话立即结束（说完了就走，双方找别人）；
+		// 真人参与的会话保持沉默权（真人可退出后重开）
+		r.onAIPrivateSilence(ev)
+	case "ai_vote_resolve":
+		r.eng.ApplyAIVote(toInt(ev.Data["number"]), ev.Data["vote_yes"] == true)
+	case "ai_slayer_resolve":
+		r.onAISlayerResolve(ev)
 	case "slayer_shoot":
 		r.onSlayerShoot(ev, reply)
 	case "ai_busy_done":
@@ -297,15 +308,16 @@ func (r *Room) handle(ev Event) {
 		r.onTipAck(ev, reply)
 	case "query_pending":
 		// HTTP 兜底竂：取当前挂起的盠选择 + 请求者的匿名编号（不依赖前状同步）
+		// 只返回"自己"的挂起——别人的挂起含角色线索，绝不能泄露
 		payload := map[string]any{"pending_choice": nil, "my_number": 0}
 		if r.game != nil {
 			if s := r.seatOf(ev.UserID); s != nil {
 				if p := r.game.Players[itoa(s.Number)]; p != nil {
 					payload["my_number"] = p.Number
+					if r.game.PendingChoice != nil && r.game.PendingChoice.Number == p.Number {
+						payload["pending_choice"] = r.game.PendingChoice
+					}
 				}
-			}
-			if r.game.PendingChoice != nil {
-				payload["pending_choice"] = r.game.PendingChoice
 			}
 		}
 		reply(true, "", payload)
@@ -363,7 +375,7 @@ func (r *Room) syncSeatsDB() {
 	// 全表删除座位
 	r.mgr.DB.Where("room_id = ?", rec.ID).Delete(&model.RoomSeat{})
 	for _, s := range r.seats {
-		seat := model.RoomSeat{RoomID: rec.ID, SeatNumber: s.Number, IsAI: s.IsAI, AIType: s.AIType}
+		seat := model.RoomSeat{RoomID: rec.ID, SeatNumber: s.Number, IsAI: s.IsAI, AIType: s.AIType, LLMConfig: s.LLMConfig}
 		if !s.IsAI {
 			uid := s.UserID
 			seat.UserID = &uid
@@ -403,7 +415,7 @@ func (r *Room) onJoin(ev Event, reply func(bool, string, map[string]any)) {
 	}
 	// 同一用户禁同时处于多个房间?	// - 在其他房间且在线（在玩）→ 拒绝，需先
 	// - 在其他房间但已线（关闭页面/斺残留）→ 清理旧座位后允加入新房?	// - 对局业离线玩袧出后，其帽?AI 接（防止卡?
-	for code2, r2 := range r.mgr.rooms {
+	for code2, r2 := range r.mgr.RoomsSnapshot() {
 		if code2 == r.Code {
 			continue
 		}
@@ -710,8 +722,11 @@ func (r *Room) onRemoveAI(ev Event, reply func(bool, string, map[string]any)) {
 	seatN, _ := ev.Data["seat"].(float64)
 	delete(r.seats, int(seatN))
 	r.syncSeatsDB()
-	// 移除 AI：清空该房间 AI 笔记（对局生命周期信号）
-	r.mgr.AI.SessionReset(r.Code)
+	// 异步清笔记（不阻塞事件循环；新 AI 入座时 SessionReset 兜底）
+	go func() {
+		defer func() { _ = recover() }()
+		r.mgr.AI.SessionReset(r.Code)
+	}()
 	r.broadcast("room.state", r.stateSnapshot())
 	reply(true, "", nil)
 }
@@ -778,6 +793,13 @@ func (r *Room) onStart(ev Event, reply func(bool, string, map[string]any)) {
 		Day:     0,
 		Players: map[string]*engine.PlayerState{},
 	}
+	// 斗蛐蛐观战：使用均衡配板（5 组专业配板随机轮转），保证 AI 对局可比性
+	if r.WatchMode {
+		board := BalancedBoards[rand.Intn(len(BalancedBoards))]
+		if len(board) == len(seatList) {
+			gd.ForceRoles = append([]string{}, board...)
+		}
+	}
 	for i, s := range seatList {
 		ps := &engine.PlayerState{
 			UserID: s.UserID, Username: s.Username, Number: nums[i], Seat: s.Number,
@@ -811,8 +833,11 @@ func (r *Room) onStart(ev Event, reply func(bool, string, map[string]any)) {
 	r.pubMsgs = nil
 	r.Status = "playing"
 	r.startedAt = time.Now()
-	// 对局生命周期信号：开局时清空该房间 AI 笔记，确保 LLM 以"新的一局"状态开始
-	r.mgr.AI.SessionReset(r.Code)
+	// 对局生命周期信号：开局时清空该房间 AI 笔记，确保 LLM 以"新的一局"状态开始（异步，不阻塞开局）
+	go func() {
+		defer func() { _ = recover() }()
+		r.mgr.AI.SessionReset(r.Code)
+	}()
 	r.mgr.DB.Model(&model.Room{}).Where("room_code = ?", r.Code).Updates(map[string]any{"status": "playing"})
 
 	r.broadcast("game.started", map[string]any{"room_code": r.Code})
@@ -860,53 +885,16 @@ func (r *Room) pubSystem(content string) {
 		r.pubMsgs = r.pubMsgs[len(r.pubMsgs)-500:]
 	}
 	r.broadcast("game.message", msg)
-	// 斗蛐蛐观战：公共事件（提名/投票/处决/天亮）也进说书人记录
-	if r.WatchMode {
+	// 斗蛐蛐观战：公共事件（提名/投票/处决）也进说书人记录；天亮死亡播报不进
+	if r.WatchMode && !strings.Contains(content, "天天亮") {
 		r.mgr.Hub.SendToUser(r.HostID, "game.watch_story", map[string]any{
 			"number": 0, "content": content,
 		})
 	}
 }
 
-// trySlayerDeclare 检测并结算猎手开枪声明（公聊发言/提名理由）
-// 返回 true 表示检测到声明并已结算（无论命中与否）
-func (r *Room) trySlayerDeclare(num int, content string) bool {
-	if r.Status != "playing" || r.game == nil {
-		return false
-	}
-	m := slayerRe.FindStringSubmatch(content)
-	if m == nil {
-		return false
-	}
-	// 否定式排除："不会开枪""不开枪""没有开枪"等只是谈论技能，不是真实开枪声明
-	if strings.Contains(m[0], "不会开枪") || strings.Contains(m[0], "不开枪") ||
-		strings.Contains(m[0], "没有开枪") || strings.Contains(m[0], "不打算开枪") ||
-		strings.Contains(m[0], "不敢开枪") || strings.Contains(m[0], "不开枪") {
-		return false
-	}
-	target, _ := strconv.Atoi(m[1])
-	hit, _, ok := r.eng.SlayerShoot(num, target)
-	if !ok {
-		// 无效声称（非猎手/技能已用/目标已死）：说书人同样回应"无事发生"，
-		// 与真猎手射偏的播报一致，不暴露声称者身份
-		r.pubSystem("🔫 #" + itoa(num) + " 声称猎手对 #" + itoa(target) + " 开枪。无事发生")
-		r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：#"+itoa(num)+" 声称自己是猎手并开枪射 #"+itoa(target)+"……无事发生，对方没死")
-		return true
-	}
-	if hit {
-		r.pubSystem("🔫 #" + itoa(num) + " 声称猎手对 #" + itoa(target) + " 开枪。他就是恶魔，当场死亡！")
-		r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：猎手 #"+itoa(num)+" 声称猎手对 #"+itoa(target)+"，恶魔死亡，游戏结束")
-		if win := r.eng.CheckWin(); win != "" {
-			r.finishGame(win)
-			return true
-		}
-	} else {
-		r.pubSystem("🔫 #" + itoa(num) + " 声称猎手对 #" + itoa(target) + " 开枪。无事发生")
-		r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：#"+itoa(num)+" 声称自己是猎手并开枪射 #"+itoa(target)+"……无事发生，对方没死")
-	}
-	r.broadcast("game.state", r.gameSnapshot())
-	return true
-}
+// trySlayerDeclare 已废弃：猎手开枪只走正规渠道（🏹按钮/提名/AI 独立决策），
+// 不再对公聊文本做正则匹配结算（避免"我暂时不会开枪"等话语被误判成开枪声明）
 
 func (r *Room) onGameChat(ev Event, reply func(bool, string, map[string]any)) {
 	if r.Status != "playing" {
@@ -946,10 +934,8 @@ func (r *Room) onGameChat(ev Event, reply func(bool, string, map[string]any)) {
 		r.pubMsgs = r.pubMsgs[len(r.pubMsgs)-500:]
 	}
 	r.broadcast("game.message", msg)
-	// 猎手开枪声明检测（公聊中喊"我是猎手，我要开枪杀X"）
+	// 每日任务：对局中发言进度
 	if !seat.IsAI {
-		r.trySlayerDeclare(num, content)
-		// 每日任务：对局中发言进度
 		model.TaskProgress(r.mgr.DB, ev.UserID, "chat", 1, 5)
 	}
 	// 真人发言后触?AI 即时回应（冷却期内跳过）
@@ -1217,50 +1203,54 @@ func (r *Room) onAIPrivateSay(ev Event) {
 			limit = 10
 		}
 		if cnt < limit {
+			// 数据在启动 goroutine 前捕获（快照），goroutine 内不读 r.game/privMsgs，避免与事件循环竞态
+			aliveSnap := r.aliveList()
+			totalSnap := len(r.game.Players)
+			clueSnap := r.eng.MyStories(target.Number)
+			ctxSnap := []map[string]any{}
+			for _, m := range r.privMsgs {
+				if m.From == p.Number && m.To == target.Number {
+					ctxSnap = append(ctxSnap, map[string]any{"num": m.From, "content": m.Content})
+				}
+			}
+			if len(ctxSnap) > 8 {
+				ctxSnap = ctxSnap[len(ctxSnap)-8:]
+			}
 			r.aiBusy = true
-			go func(aiNum int, aiRole string, aiTeam string, aiConf string, clues []string, askerNum int) {
+			go func(aiNum int, aiRole string, aiTeam string, aiConf string, clues []string, askerNum int, aliveSnap []int, totalSnap int, ctx []map[string]any) {
 				defer func() {
 					if rec := recover(); rec != nil {
 						log.Printf("[ai-debug] PANIC aiPrivateReplyLoop: %v", rec)
 					}
 					r.Post(Event{Type: "ai_busy_done"})
 				}()
-				ctx := []map[string]any{}
-				for _, m := range r.privMsgs {
-					if (m.From == aiNum && m.To == askerNum) || (m.From == askerNum && m.To == aiNum) {
-						ctx = append(ctx, map[string]any{"num": m.From, "content": m.Content})
-					}
+				reply, ok, endChat := r.mgr.AI.SpeakWithEnd(aiclient.SpeakReq{
+					RoomCode:  r.Code,
+					RoleName:  aiRole,
+					Team:      aiTeam,
+					Number:    aiNum,
+					Phase:     "private_chat",
+					Day:       r.game.Day,
+					AliveNums: aliveSnap, TotalPlayers: totalSnap,
+					Context:   ctx,
+					MyClues:   clues,
+					LLMConf:   aiConf,
+					OtherNum:  askerNum,
+				})
+				if !ok || reply == "" {
+					return
 				}
-			if len(ctx) > 10 {
-				ctx = ctx[len(ctx)-10:]
-			}
-			reply, ok, endChat := r.mgr.AI.SpeakWithEnd(aiclient.SpeakReq{
-				RoomCode:  r.Code,
-				RoleName:  aiRole,
-				Team:      aiTeam,
-				Number:    aiNum,
-				Phase:     "private_chat",
-				Day:       r.game.Day,
-				AliveNums: r.aliveList(), TotalPlayers: len(r.game.Players),
-				Context:   ctx,
-				MyClues:   clues,
-				LLMConf:   aiConf,
-				OtherNum:  askerNum,
-			})
-			if !ok || reply == "" {
-				return
-			}
-			if endChat {
-				r.Post(Event{Type: "ai_private_silence", Data: map[string]any{"number": aiNum, "to_number": askerNum}})
-			}
-			r.Post(Event{Type: "ai_private_say", Data: map[string]any{
-				"number": aiNum, "to_number": askerNum, "content": reply,
-			}})
-		}(target.Number, target.RoleName, target.Team, target.LLMConf, r.eng.MyStories(target.Number), p.Number)
-	} else {
-		// 聊满上限：结束该会话（退出私聊，双方可找其他人）
-		r.endSession(p.Number, target.Number)
-	}
+				if endChat {
+					r.Post(Event{Type: "ai_private_silence", Data: map[string]any{"number": aiNum, "to_number": askerNum}})
+				}
+				r.Post(Event{Type: "ai_private_say", Data: map[string]any{
+					"number": aiNum, "to_number": askerNum, "content": reply,
+				}})
+			}(target.Number, target.RoleName, target.Team, target.LLMConf, clueSnap, p.Number, aliveSnap, totalSnap, ctxSnap)
+		} else {
+			// 聊满上限：结束该会话（退出私聊，双方可找其他人）
+			r.endSession(p.Number, target.Number)
+		}
 }
 }
 
@@ -1307,6 +1297,22 @@ func (r *Room) setSilence(ai, other int) {
 		r.privateSilence[ai] = map[int]bool{}
 	}
 	r.privateSilence[ai][other] = true
+}
+
+// onAIPrivateSilence AI 私聊收尾事件：AI↔AI 直接结束会话（说完了就走），真人参与则沉默权
+func (r *Room) onAIPrivateSilence(ev Event) {
+	num := toInt(ev.Data["number"])
+	toNum := toInt(ev.Data["to_number"])
+	p := r.game.Players[pidOfNum(r.game, num)]
+	t := r.game.Players[pidOfNum(r.game, toNum)]
+	if p == nil || t == nil {
+		return
+	}
+	if p.IsAI && t.IsAI {
+		r.endSession(num, toNum)
+		return
+	}
+	r.setSilence(num, toNum)
 }
 
 // isSilent AI 是否已对该会话沉默
@@ -1395,6 +1401,31 @@ func (r *Room) onSlayerShoot(ev Event, reply func(bool, string, map[string]any))
 	reply(true, "", nil)
 }
 
+// onAISlayerResolve AI 猎手开枪决策回投（事件循环内结算，无竞态）
+func (r *Room) onAISlayerResolve(ev Event) {
+	if r.Status != "playing" || r.game == nil {
+		return
+	}
+	num := toInt(ev.Data["number"])
+	target := toInt(ev.Data["target"])
+	hit, _, ok := r.eng.SlayerShoot(num, target)
+	if !ok {
+		return
+	}
+	if hit {
+		r.pubSystem("🔫 #" + itoa(num) + " 声称猎手对 #" + itoa(target) + " 开枪。他就是恶魔，当场死亡！")
+		r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：猎手 #"+itoa(num)+" 声称猎手对 #"+itoa(target)+"，恶魔死亡，游戏结束")
+		if win := r.eng.CheckWin(); win != "" {
+			r.finishGame(win)
+			return
+		}
+	} else {
+		r.pubSystem("🔫 #" + itoa(num) + " 声称猎手对 #" + itoa(target) + " 开枪。无事发生")
+		r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：#"+itoa(num)+" 声称自己是猎手并开枪射 #"+itoa(target)+"……无事发生，对方没死")
+	}
+	r.broadcast("game.state", r.gameSnapshot())
+}
+
 // onAISay AI 异发言结果回投：校验玩家仍在且存活后广播（在事件徎内执行，无竞争）
 func (r *Room) onAISay(ev Event) {
 	if r.Status != "playing" || r.game == nil {
@@ -1437,8 +1468,6 @@ func (r *Room) onAISay(ev Event) {
 			}
 		}(p.Number, segs)
 	}
-	// AI 发言同样检测猎手开枪声明
-	r.trySlayerDeclare(p.Number, content)
 }
 
 // onAISaySegment 分段发言的单条消息回投（在事件循环内执行，线程安全）
@@ -1553,27 +1582,15 @@ func (r *Room) onNominate(ev Event, reply func(bool, string, map[string]any)) {
 		reply(false, result["message"].(string), nil)
 		return
 	}
-	// 猎手提名 = 对提名对象开枪（官方变体规则：提名对象即开枪对象）
-	if p := r.game.Players[itoa(seat.Number)]; p != nil && p.Role == "slayer" && !p.SlayerUsed {
-		if hit, _, ok := r.eng.SlayerShoot(myNum, int(target)); ok {
-			if hit {
+	// 立即效果（猎手/贞洁者）：引擎 Nominate 已处理并返回 special，这里统一播报
+	if result["special"] != nil {
+		if sp, _ := result["special"].(string); sp == "slayer" {
+			if result["game_over"] == true {
 				r.pubSystem("🔫 #" + itoa(myNum) + " 声称猎手对 #" + itoa(int(target)) + " 开枪。他就是恶魔，当场死亡！")
-				r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：猎手 #"+itoa(myNum)+" 声称猎手对 #"+itoa(int(target))+"，恶魔死亡，游戏结束")
-				if win := r.eng.CheckWin(); win != "" {
-					r.finishGame(win)
-					reply(true, "", result)
-					return
-				}
 			} else {
 				r.pubSystem("🔫 #" + itoa(myNum) + " 声称猎手对 #" + itoa(int(target)) + " 开枪。无事发生")
-				r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：#"+itoa(myNum)+" 声称自己是猎手并开枪射 #"+itoa(int(target))+"……无事发生，对方没死")
 			}
-			r.broadcast("game.state", r.gameSnapshot())
-		}
-	}
-	// 立即效果（猎?贞洁者）
-	if result["special"] != nil {
-		if msg, ok := result["message"].(string); ok {
+		} else if msg, ok := result["message"].(string); ok {
 			r.pubSystem("⚡ " + msg)
 		}
 		r.broadcast("game.nominate", result)
@@ -1696,9 +1713,11 @@ func (r *Room) onPrivateInvite(ev Event, reply func(bool, string, map[string]any
 			reply(true, "", map[string]any{"auto_accept": true, "partner": target.Number})
 			return
 		}
-		// API AI：异步让 AI 自己想是否接受
+		// API AI：异步让 AI 自己想是否接受（数据快照捕获，goroutine 内不读可变状态）
+		aliveSnap := r.aliveList()
+		clueSnap := r.eng.MyStories(target.Number)
 		r.aiBusy = true
-		go func(fromNum int, fromUID uint, ai *engine.PlayerState) {
+		go func(fromNum int, fromUID uint, ai *engine.PlayerState, aliveSnap []int, clueSnap []string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					log.Printf("[ai-debug] PANIC DecidePrivateAccept: %v", rec)
@@ -1706,14 +1725,14 @@ func (r *Room) onPrivateInvite(ev Event, reply func(bool, string, map[string]any
 				r.Post(Event{Type: "ai_busy_done"})
 			}()
 			accept, ok := r.mgr.AI.DecidePrivateAccept(r.Code, ai.RoleName, fromNum,
-				r.aliveList(), ai.Number, ai.LLMConf, r.eng.MyStories(ai.Number))
+				aliveSnap, ai.Number, ai.LLMConf, clueSnap)
 			if !ok {
 				accept = true
 			}
 			r.Post(Event{Type: "ai_private_accept_resolve", Data: map[string]any{
 				"from": fromNum, "target": ai.Number, "accept": accept,
 			}})
-		}(me.Number, me.UserID, target)
+		}(me.Number, me.UserID, target, aliveSnap, clueSnap)
 		reply(true, "", map[string]any{"waiting": true, "partner": target.Number})
 		return
 	}
@@ -1759,7 +1778,11 @@ func (r *Room) onPrivateAccept(ev Event, reply func(bool, string, map[string]any
 // aiPrivateFirstLine AI 在聊会话建立后主动发?
 func (r *Room) aiPrivateFirstLine(ai, other *engine.PlayerState) {
 	log.Printf("[ai-private] 触发笸?ai=#%d other=#%d type=%s", ai.Number, other.Number, ai.AIType)
-	go func(aiNum int, aiRole string, aiTeam string, aiConf string, clues []string, otherNum int) {
+	// 数据快照捕获：goroutine 内不读 r.game（防与事件循环竞态）
+	aliveSnap := r.aliveList()
+	totalSnap := len(r.game.Players)
+	clueSnap := r.eng.MyStories(ai.Number)
+	go func(aiNum int, aiRole string, aiTeam string, aiConf string, clues []string, otherNum int, aliveSnap []int, totalSnap int) {
 		defer func() {
 			r.Post(Event{Type: "ai_busy_done"})
 		}()
@@ -1770,7 +1793,7 @@ func (r *Room) aiPrivateFirstLine(ai, other *engine.PlayerState) {
 			Number:    aiNum,
 			Phase:     "private_chat",
 			Day:       r.game.Day,
-			AliveNums: r.aliveList(), TotalPlayers: len(r.game.Players),
+			AliveNums: aliveSnap, TotalPlayers: totalSnap,
 			Context:   []map[string]any{{"num": 0, "content": "你们刚刚建立了私聊，请主动开启话题"}},
 			MyClues:   clues,
 			LLMConf:   aiConf,
@@ -1786,7 +1809,7 @@ func (r *Room) aiPrivateFirstLine(ai, other *engine.PlayerState) {
 		r.Post(Event{Type: "ai_private_say", Data: map[string]any{
 			"number": aiNum, "to_number": otherNum, "content": reply,
 		}})
-	}(ai.Number, ai.RoleName, ai.Team, ai.LLMConf, r.eng.MyStories(ai.Number), other.Number)
+	}(ai.Number, ai.RoleName, ai.Team, ai.LLMConf, clueSnap, other.Number, aliveSnap, totalSnap)
 }
 
 // onPrivateDecline 拒绝私聊?
@@ -1916,24 +1939,27 @@ func (r *Room) onPrivateChat(ev Event, reply func(bool, string, map[string]any))
 		if r.isSilent(target.Number, me.Number) {
 			return // AI 已自然收尾，保持沉默（仅思考不回复）
 		}
+		// 数据快照捕获：goroutine 内不读 r.game/privMsgs
+		aliveSnap := r.aliveList()
+		totalSnap := len(r.game.Players)
+		clueSnap := r.eng.MyStories(target.Number)
+		ctxSnap := []map[string]any{}
+		for _, m := range r.privMsgs {
+			if m.From == me.Number && m.To == target.Number {
+				ctxSnap = append(ctxSnap, map[string]any{"num": m.From, "content": m.Content})
+			}
+		}
+		if len(ctxSnap) > 8 {
+			ctxSnap = ctxSnap[len(ctxSnap)-8:]
+		}
 		r.aiBusy = true
-		go func(aiNum int, aiRole string, aiTeam string, aiConf string, clues []string, askerNum int, askerMsg string) {
+		go func(aiNum int, aiRole string, aiTeam string, aiConf string, clues []string, askerNum int, askerMsg string, aliveSnap []int, totalSnap int, ctx []map[string]any) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					log.Printf("[ai-debug] PANIC aiPrivateReply: %v", rec)
 				}
 				r.Post(Event{Type: "ai_busy_done"})
 			}()
-			// 收集?AI 与方的私聊历史作为上下?
-			ctx := []map[string]any{}
-			for _, m := range r.privMsgs {
-				if (m.From == aiNum && m.To == askerNum) || (m.From == askerNum && m.To == aiNum) {
-					ctx = append(ctx, map[string]any{"num": m.From, "content": m.Content})
-				}
-			}
-			if len(ctx) > 10 {
-				ctx = ctx[len(ctx)-10:]
-			}
 			reply, ok, endChat := r.mgr.AI.SpeakWithEnd(aiclient.SpeakReq{
 				RoomCode:  r.Code,
 				RoleName:  aiRole,
@@ -1941,7 +1967,7 @@ func (r *Room) onPrivateChat(ev Event, reply func(bool, string, map[string]any))
 				Number:    aiNum,
 				Phase:     "private_chat",
 				Day:       r.game.Day,
-				AliveNums: r.aliveList(), TotalPlayers: len(r.game.Players),
+				AliveNums: aliveSnap, TotalPlayers: totalSnap,
 				Context:   ctx,
 				MyClues:   clues,
 				LLMConf:   aiConf,
@@ -1956,7 +1982,7 @@ func (r *Room) onPrivateChat(ev Event, reply func(bool, string, map[string]any))
 			r.Post(Event{Type: "ai_private_say", Data: map[string]any{
 				"number": aiNum, "to_number": askerNum, "content": reply,
 			}})
-		}(target.Number, target.RoleName, target.Team, target.LLMConf, r.eng.MyStories(target.Number), me.Number, content)
+		}(target.Number, target.RoleName, target.Team, target.LLMConf, clueSnap, me.Number, content, aliveSnap, totalSnap, ctxSnap)
 	}
 	reply(true, "", map[string]any{"message": payload})
 }
@@ -2026,7 +2052,7 @@ func (r *Room) checkVoteTimeout() {
 		return
 	}
 	v := r.game.ActiveVote
-	// 辩期：到期后启动投祼同时投票倒时，AI 立即投票?
+	// 辩期：到期后启动投祼同时投票倒时，AI 异步投票（不阻塞事件循环）
 	if v.VoteDeadline == 0 {
 		if time.Now().Unix() >= v.DebateDeadline {
 			turnResult, _ := r.eng.StartVoting()
@@ -2037,6 +2063,23 @@ func (r *Room) checkVoteTimeout() {
 			r.broadcast("game.state", r.gameSnapshot())
 			// 提名事件通知 AI：辩论开始，请聆听
 			r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：#"+itoa(v.FromNumber)+" 提名了 #"+itoa(v.TargetNumber)+"，辩论开始，请仔细聆听")
+			// AI 玩家异步投票（并行决策，结果经 ai_vote_resolve 事件回投写票；数据快照捕获防竞态）
+			aliveSnap := r.aliveList()
+			for _, p := range r.eng.AIVoters() {
+				go func(aiNum int, roleName string, llmConf string, clues []string, aliveSnap []int) {
+					defer func() {
+						if rec := recover(); rec != nil {
+							log.Printf("[ai-debug] PANIC aiVoteAsync: %v", rec)
+						}
+					}()
+					yes, ok := r.mgr.AI.DecideVote(r.Code, roleName, v.FromNumber, v.TargetNumber,
+						aliveSnap, aiNum, llmConf, clues)
+					if !ok {
+						return
+					}
+					r.Post(Event{Type: "ai_vote_resolve", Data: map[string]any{"number": aiNum, "vote_yes": yes}})
+				}(p.Number, p.RoleName, p.LLMConf, r.eng.MyStories(p.Number), aliveSnap)
+			}
 		}
 		return
 	}
@@ -2107,30 +2150,6 @@ func toInt(v any) int {
 	return 0
 }
 
-// voteStatsText 投票统系统消息文本（公聊展示：已投/朊/每人票数 + 30 秒提名窗口提示）
-func (r *Room) voteStatsText(result map[string]any) string {
-	yes, _ := result["yes"].(int)
-	abstain, _ := result["abstain"].(int)
-	voted, _ := result["voted"].(int)
-	unvoted, _ := result["unvoted"].(int)
-	target, _ := result["target"].(int)
-	return "📢 投票结束?" + itoa(target) + " 赞成 " + itoa(yes) +
-		" 祼弃权 " + itoa(abstain) + " 祼已投?" + itoa(voted) +
-		" 人，朊?" + itoa(unvoted) + " 人?" + itoa(target) +
-		" ?" + itoa(yes) + " 祼等待其他提名?倒?0秒后无人提名则进入游戏流程下?"
-}
-
-// addPubSystemMsg 向公聊追加系统消恹广播（提?投票统等）
-func (r *Room) addPubSystemMsg(content string) {
-	r.msgSeq++
-	msg := GameMsg{ID: r.msgSeq, Number: 0, Content: content, System: true, At: time.Now()}
-	r.pubMsgs = append(r.pubMsgs, msg)
-	if !r.WatchMode && len(r.pubMsgs) > 500 {
-		r.pubMsgs = r.pubMsgs[len(r.pubMsgs)-500:]
-	}
-	r.broadcast("game.message", msg)
-}
-
 // onVote 真人玩投票/取消投票（时内叏复切换意向）
 func (r *Room) onVote(ev Event, reply func(bool, string, map[string]any)) {
 	if r.Status != "playing" || r.game == nil {
@@ -2198,8 +2217,8 @@ func (r *Room) onMyInfo(ev Event, reply func(bool, string, map[string]any)) {
 		"my_team":   p.Team,
 		"my_number": p.Number,
 	}
-	// 兜底：附带挂起中的目标择（WS 事件丢失时前竻叼面板?
-	if r.game.PendingChoice != nil {
+	// 兜底：附带挂起中的目标择（WS 事件丢失时前竻叼面板?——只返回自己的挂起，防角色线索泄露）
+	if r.game.PendingChoice != nil && r.game.PendingChoice.Number == p.Number {
 		payload["pending_choice"] = r.game.PendingChoice
 	}
 	reply(true, "", payload)
@@ -2241,6 +2260,9 @@ func (r *Room) finishGame(winner string) {
 	privJSON, _ := json.Marshal(r.privMsgs)
 	// 参与玩 uid 列表?1,2, 格式，战绩统?LIKE 查甼
 	uidSet := map[uint]bool{}
+	if r.WatchMode {
+		uidSet[r.HostID] = true // 斗蛐蛐观战局：房主不占座，但归档需含房主（历史记录查询用）
+	}
 	for _, p := range r.game.Players {
 		if p.UserID != 0 {
 			uidSet[p.UserID] = true
@@ -2265,6 +2287,30 @@ func (r *Room) finishGame(winner string) {
 		PrivateMsgs: string(privJSON),    // 私聊日志（仅归档，不对玩家广撼
 	})
 
+	// 赛后 AI 复盘：异步生成说书人视角回顾，写回对局记录（不阻塞结算）
+	// 注意：数据在启动 goroutine 前收集完毕，避免 r.game 被置 nil 后访问
+	recapPlayers := []map[string]any{}
+	recapMsgs := []map[string]any{}
+	recapConf := ""
+	for _, p := range r.game.Players {
+		recapPlayers = append(recapPlayers, map[string]any{"number": p.Number, "role_name": p.RoleName})
+		if p.IsAI && p.LLMConf != "" && recapConf == "" {
+			recapConf = p.LLMConf
+		}
+	}
+	for _, m := range r.pubMsgs {
+		recapMsgs = append(recapMsgs, map[string]any{"num": m.Number, "content": m.Content})
+	}
+	go func() {
+		if recapConf == "" {
+			return
+		}
+		recap, ok := r.mgr.AI.Recap(r.Code, winner, recapPlayers, recapMsgs, recapConf)
+		if ok && recap != "" {
+			r.mgr.DB.Model(&model.GameLog{}).Where("room_code = ?", r.Code).Update("recap", recap)
+		}
+	}()
+
 	// 金币结算与每日任务进度：真人玩家按胜负发放（AI 座位 UserID=0 跳过）
 	for _, p := range r.game.Players {
 		if p.UserID == 0 {
@@ -2276,8 +2322,11 @@ func (r *Room) finishGame(winner string) {
 	}
 
 	r.broadcast("game.over", map[string]any{"winner": winner})
-	// 对局生命周期信号：结束时清空 AI 笔记，让 AI"停止扮演"
-	r.mgr.AI.SessionReset(r.Code)
+	// 对局生命周期信号：结束时清空 AI 笔记，让 AI"停止扮演"（异步，不阻塞结算）
+	go func() {
+		defer func() { _ = recover() }()
+		r.mgr.AI.SessionReset(r.Code)
+	}()
 
 	// 复位为等待状?
 	r.Status = "waiting"
@@ -2329,22 +2378,24 @@ func (r *Room) aiDebate() {
 		if num == v.FromNumber {
 			role = "提名者"
 		}
-		go func(aiNum int, aiRole, aiTeam, aiConf, aiRoleName, dbRole string, clues []string) {
+		// 数据快照捕获：goroutine 内不读 r.game/pubMsgs
+		aliveSnap := r.aliveList()
+		totalSnap := len(r.game.Players)
+		ctxSnap := []map[string]any{}
+		recent := r.pubMsgs
+		if len(recent) > 10 {
+			recent = recent[len(recent)-10:]
+		}
+		for _, m := range recent {
+			ctxSnap = append(ctxSnap, map[string]any{"num": m.Number, "content": m.Content})
+		}
+		go func(aiNum int, aiRole, aiTeam, aiConf, aiRoleName, dbRole string, clues []string, aliveSnap []int, totalSnap int, ctx []map[string]any) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					log.Printf("[ai-debug] PANIC aiDebate: %v", rec)
 				}
 				r.Post(Event{Type: "ai_busy_done"})
 			}()
-			ctx := []map[string]any{}
-			recent := r.pubMsgs
-			if len(recent) > 10 {
-				recent = recent[len(recent)-10:]
-			}
-			for _, m := range recent {
-				ctx = append(ctx, map[string]any{"num": m.Number, "content": m.Content})
-			}
-			aliveNums := r.aliveList()
 			reply, ok := r.mgr.AI.Speak(aiclient.SpeakReq{
 				RoomCode:  r.Code,
 				RoleName:  aiRole,
@@ -2352,7 +2403,7 @@ func (r *Room) aiDebate() {
 				Number:    aiNum,
 				Phase:     "nomination",
 				Day:       r.game.Day,
-				AliveNums: aliveNums, TotalPlayers: len(r.game.Players),
+				AliveNums: aliveSnap, TotalPlayers: totalSnap,
 				Context:   ctx,
 				MyClues:   clues,
 				LLMConf:   aiConf,
@@ -2361,7 +2412,7 @@ func (r *Room) aiDebate() {
 				return
 			}
 			r.Post(Event{Type: "ai_say", Data: map[string]any{"number": aiNum, "content": reply}})
-		}(p.Number, p.RoleName, p.Team, p.LLMConf, p.RoleName, role, r.eng.MyStories(p.Number))
+		}(p.Number, p.RoleName, p.Team, p.LLMConf, p.RoleName, role, r.eng.MyStories(p.Number), aliveSnap, totalSnap, ctxSnap)
 		return
 	}
 }
@@ -2489,6 +2540,17 @@ func (r *Room) aiNominate() {
 		if !p.Alive || !p.IsAI || p.AIType != "api" {
 			continue
 		}
+		// 本轮已提名过的 AI 不再提名（每人每轮只有一次提名权）
+		used := false
+		for _, rec := range r.game.Nominations {
+			if rec.FromNumber == p.Number {
+				used = true
+				break
+			}
+		}
+		if used {
+			continue
+		}
 		if rand.Float64() > 0.5 {
 			continue
 		}
@@ -2508,6 +2570,7 @@ func (r *Room) aiNominate() {
 		return
 	}
 	// AI 猎手：优先做开枪决策（不消耗提名冷却；射偏技能作废并暴露身份）
+	// goroutine 只做 LLM 决策，开枪结算经事件回投（避免 goroutine 写游戏状态竞态）
 	if nominator.Role == "slayer" && !nominator.SlayerUsed {
 		r.aiBusy = true
 		go func(num int, llmConf string, clues []string, alive []int) {
@@ -2524,61 +2587,53 @@ func (r *Room) aiNominate() {
 			if !ok || target == 0 {
 				return
 			}
-			hit, _, ok := r.eng.SlayerShoot(num, target)
-			if !ok {
-				return
-			}
-			if hit {
-				r.pubSystem("🔫 #" + itoa(num) + " 声称猎手对 #" + itoa(target) + " 开枪。他就是恶魔，当场死亡！")
-				r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：猎手 #"+itoa(num)+" 声称猎手对 #"+itoa(target)+"，恶魔死亡，游戏结束")
-				if win := r.eng.CheckWin(); win != "" {
-					r.finishGame(win)
-					return
-				}
-			} else {
-				r.pubSystem("🔫 #" + itoa(num) + " 声称猎手对 #" + itoa(target) + " 开枪。无事发生")
-				r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：#"+itoa(num)+" 声称自己是猎手并开枪射 #"+itoa(target)+"……无事发生，对方没死")
-			}
-			r.broadcast("game.state", r.gameSnapshot())
+			r.Post(Event{Type: "ai_slayer_resolve", Data: map[string]any{"number": num, "target": target}})
 		}(nominator.Number, nominator.LLMConf, r.eng.MyStories(nominator.Number), aliveNums)
 		return
 	}
+	// 今天已被提名过的玩家：不能再提名，从候选里剔除（goroutine 外计算，防竞态）
+	excluded := []int{}
+	for _, rec := range r.game.Nominations {
+		excluded = append(excluded, rec.TargetNumber)
+	}
+	cands := []int{}
+	for _, n := range aliveNums {
+		skip := false
+		for _, x := range excluded {
+			if x == n {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			cands = append(cands, n)
+		}
+	}
+	if len(cands) == 0 {
+		log.Printf("[ai-debug] aiNominate room=%s #%d cands 为空 excluded=%v", r.Code, nominator.Number, excluded)
+		return
+	}
+	prompt := "白天提名决策：本轮白天你只有一次提名权，用过即收回，请仔细思考提名对象。"
+	prompt += "如果你只是想说话、没有实质的处决目标，就不要提名（公聊阶段可以继续发言）。"
+	prompt += "提名的动机可以是处决嫌疑目标、逼沉默玩家表态、开视野验证信息。选择你最有理由提名的人（不一定要投死对方，投票由全体玩家决定）"
+	if len(excluded) > 0 {
+		prompt += "。今天已被提名过、不能再提名的玩家：" + joinInts(excluded)
+	}
 	r.aiBusy = true
-	go func(num int, roleName string, team string, llmConf string, clues []string) {
+	daySnap := r.game.Day
+	totalSnap := len(r.game.Players)
+	go func(num int, roleName string, team string, llmConf string, clues []string, cands []int, prompt string, daySnap int, totalSnap int) {
 		defer func() {
 			r.Post(Event{Type: "ai_busy_done"})
 		}()
-		// 今天已被提名过的玩家：不能再提名，从候选里剔除并告知 AI
-		excluded := []int{}
-		for _, rec := range r.game.Nominations {
-			excluded = append(excluded, rec.TargetNumber)
-		}
-		cands := []int{}
-		for _, n := range aliveNums {
-			skip := false
-			for _, x := range excluded {
-				if x == n {
-					skip = true
-					break
-				}
-			}
-			if !skip {
-				cands = append(cands, n)
-			}
-		}
-		if len(cands) == 0 {
-			return
-		}
-		prompt := "白天提名决策：提名的动机可以是处决嫌疑目标、逼沉默玩家表态、自证清白开视野。选择你最有理由提名的人（不一定要投死对方，投票由全体玩家决定）"
-		if len(excluded) > 0 {
-			prompt += "。今天已被提名过、不能再提名的玩家：" + joinInts(excluded)
-		}
 		// 选怀疑目标（LLM 基于说书人线索+角色立场推理）
 		target, ok := r.mgr.AI.DecideWithCluesRoom(r.Code, roleName,
 			prompt, cands, num, llmConf, clues)
 		if !ok {
+			log.Printf("[ai-debug] aiNominate room=%s #%d Decide 失败", r.Code, num)
 			return
 		}
+		log.Printf("[ai-debug] aiNominate room=%s #%d 选定目标 #%d", r.Code, num, target)
 		// ?生成提名理由
 		reason, _ := r.mgr.AI.Speak(aiclient.SpeakReq{
 			RoomCode:  r.Code,
@@ -2586,14 +2641,14 @@ func (r *Room) aiNominate() {
 			Team:      team,
 			Number:    num,
 			Phase:     "nomination",
-			Day:       r.game.Day,
-			AliveNums: aliveNums, TotalPlayers: len(r.game.Players),
+			Day:       daySnap,
+			AliveNums: aliveNums, TotalPlayers: totalSnap,
 			Context:   []map[string]any{{"num": 0, "content": "你决定提名 #" + itoa(target) + "，请给出你的怀疑理由"}},
 			MyClues:   clues,
 			LLMConf:   llmConf,
 		})
 		r.Post(Event{Type: "ai_nominate", Data: map[string]any{"number": num, "target": target, "reason": reason}})
-	}(nominator.Number, nominator.RoleName, nominator.Team, nominator.LLMConf, r.eng.MyStories(nominator.Number))
+	}(nominator.Number, nominator.RoleName, nominator.Team, nominator.LLMConf, r.eng.MyStories(nominator.Number), cands, prompt, daySnap, totalSnap)
 }
 
 // aiAutoPrivate 私聊阶：AI 玩以率向随机存活玩发起私聊?
@@ -2619,8 +2674,10 @@ func (r *Room) aiAutoPrivate() {
 			continue
 		}
 		if isEvil {
-			// 邪恶方：每 tick 必找队友（提高概率，保证战术交流发生）
-			if rand.Float64() > 0.7 {
+			// 邪恶方必找队友；首夜后的第一个私聊阶段 100% 先碰头（统一口径仪式感）
+			if r.game.Day == 0 {
+				// 第一天：无概率，必找队友
+			} else if rand.Float64() > 0.7 {
 				continue
 			}
 		} else {
@@ -2700,28 +2757,6 @@ func (r *Room) aliveList() []int {
 	return aliveNums
 }
 
-// aiPrivateContent AI 私聊内（大模型生成，失败时朜模板降级?
-func (r *Room) aiPrivateContent(from, to *engine.PlayerState) string {
-	reply, ok := r.mgr.AI.Speak(aiclient.SpeakReq{
-		RoleName:  from.RoleName,
-		Number:    from.Number,
-		Phase:     "private_chat",
-		Day:       r.game.Day,
-		AliveNums: r.aliveList(), TotalPlayers: len(r.game.Players),
-		OtherNum:  to.Number,
-	})
-	if !ok || reply == "" {
-		lines := []string{
-			"我得我仏以合作，你么看？",
-			"你昨晚得到什么信恺吗？",
-			"小心躾的人，我觉得有人相你了",
-			"关于躻，我下交捸下情报？",
-		}
-		reply = lines[rand.Intn(len(lines))]
-	}
-	return reply
-}
-
 // ==============================
 // 必序列?
 // ==============================
@@ -2788,6 +2823,7 @@ func (r *Room) gameSnapshot() map[string]any {
 		}
 	}
 	// 非观战房间：脱敏下发——真人玩家绝不能从快照里看到其他玩家的角色/阵营/私密信息
+	pendingView := r.game.PendingChoice
 	if !r.WatchMode {
 		safe := map[string]*engine.PlayerState{}
 		for pid, p := range playersView {
@@ -2805,13 +2841,14 @@ func (r *Room) gameSnapshot() map[string]any {
 			safe[pid] = &cp
 		}
 		playersView = safe
+		pendingView = nil // 挂起选择含角色线索（"某人是占卜师"），非观战一律不下发
 	}
 	return map[string]any{
 		"game": map[string]any{
 			"phase":          r.game.Phase,
 			"day":            r.game.Day,
 			"players":        playersView,
-			"pending_choice": r.game.PendingChoice, // 挂起状随必下发（重连恢?防面板诅?
+			"pending_choice": pendingView,
 			"active_vote":    r.game.ActiveVote,
 			"nominations":    r.game.Nominations,
 		},

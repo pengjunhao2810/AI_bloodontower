@@ -116,7 +116,6 @@ func main() {
 		api.POST("/llm_ping", handler.AuthRequired(), h.LLMPing)
 		api.GET("/ai_usage", handler.AuthRequired(), h.AIUsage)
 	api.GET("/captcha", h.Captcha)
-	api.GET("/arena/keys", handler.AuthRequired(), h.ArenaKeys)
 	api.GET("/shop", handler.AuthRequired(), h.ShopList)
 		api.POST("/shop/buy", handler.AuthRequired(), h.ShopBuy)
 		api.POST("/shop/equip", handler.AuthRequired(), h.EquipItem)

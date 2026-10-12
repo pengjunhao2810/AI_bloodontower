@@ -65,6 +65,7 @@ type RoomSeat struct {
 	SeatNumber int       `gorm:"not null" json:"seat_number"`
 	IsAI       bool      `json:"is_ai"`
 	AIType     string    `gorm:"size:20;default:local" json:"ai_type"`
+	LLMConfig  string    `gorm:"type:text" json:"-"` // 大模型配置 JSON（AI 座位；服务重启后恢复用）
 	JoinedAt   time.Time `json:"joined_at"`
 	User       *User     `gorm:"foreignKey:UserID" json:"-"`
 }
@@ -113,6 +114,7 @@ type GameLog struct {
 	Stories     string    `json:"-"`                 // 说书人信息 JSON
 	Actions     string    `json:"-"`                 // 夜晚选择方式日志 JSON（manual/timeout/ai）
 	PrivateMsgs string    `json:"-"`                 // 私聊日志 JSON（仅归档，不对玩家广播）
+	Recap       string    `json:"-"`                 // 赛后 AI 复盘（说书人视角回顾，对局结束异步生成）
 }
 
 // ForumPost 论坛帖子

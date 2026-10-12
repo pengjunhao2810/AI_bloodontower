@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"math/rand"
 	"net/http"
 	"sync"
 
@@ -12,8 +11,6 @@ import (
 	"botc-server/internal/room"
 	"botc-server/internal/ws"
 )
-
-func randIntn(n int) int { return rand.Intn(n) }
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,

@@ -52,6 +52,10 @@ func (c *Client) Rooms() []string {
 
 // sendBytes 非阻塞投递消息（缓冲区满视为慢客户端，断开）
 func (c *Client) sendBytes(payload []byte) {
+	defer func() {
+		// 连接已关闭后仍有广播送达（send channel 已关闭/Conn 已关）时防止 panic
+		_ = recover()
+	}()
 	select {
 	case c.send <- payload:
 	default:
@@ -60,9 +64,11 @@ func (c *Client) sendBytes(payload []byte) {
 }
 
 // Close 安全关闭连接
+// 注意：不 close(c.send)——sendBytes 是"select 非阻塞"投递，
+// 关闭 channel 会让并发中的 sendBytes panic（send on closed channel），
+// WritePump 靠 Conn 关闭自然退出，channel 由 GC 回收
 func (c *Client) Close() {
 	c.once.Do(func() {
-		close(c.send)
 		c.Conn.Close()
 	})
 }

@@ -123,8 +123,11 @@ func (m *Manager) Delete(code string) {
 	m.mu.Unlock()
 	if ok {
 		close(r.quit)
-		// 解散房间：清空该房间 AI 笔记（对局生命周期信号）
-		r.mgr.AI.SessionReset(r.Code)
+		// 解散房间：清空该房间 AI 笔记（对局生命周期信号，异步不阻塞销毁）
+		go func() {
+			defer func() { _ = recover() }()
+			r.mgr.AI.SessionReset(r.Code)
+		}()
 		// 房间销毁 = 房间记录 + 座位记录一起删（此前只删房间留下孤儿座位）
 		var rec model.Room
 		m.DB.Where("room_code = ?", code).First(&rec)
@@ -140,6 +143,17 @@ func (m *Manager) List() []string {
 	out := make([]string, 0, len(m.rooms))
 	for k := range m.rooms {
 		out = append(out, k)
+	}
+	return out
+}
+
+// RoomsSnapshot 返回所有房间的快照副本（跨房间迁移校验等场景的并发安全访问）
+func (m *Manager) RoomsSnapshot() map[string]*Room {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]*Room, len(m.rooms))
+	for k, v := range m.rooms {
+		out[k] = v
 	}
 	return out
 }
@@ -238,7 +252,7 @@ func restoreFromDB(m *Manager, rec *model.Room) *Room {
 		if s.UserID != nil {
 			uid = *s.UserID
 		}
-		r.seats[s.SeatNumber] = &Seat{Number: s.SeatNumber, UserID: uid, Username: name, IsAI: s.IsAI, AIType: s.AIType, IsReady: s.IsAI}
+		r.seats[s.SeatNumber] = &Seat{Number: s.SeatNumber, UserID: uid, Username: name, IsAI: s.IsAI, AIType: s.AIType, LLMConfig: s.LLMConfig, IsReady: s.IsAI}
 	}
 	return r
 }

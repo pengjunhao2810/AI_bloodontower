@@ -105,6 +105,9 @@ type GameData struct {
 	// 提名冷却窗口截止时间（unix 秒）：未处决的提名结束后 30 秒内禁止新提名
 	NomCooldownUntil int64 `json:"nom_cooldown_until"`
 
+	// 均衡配板：斗蛐蛐观战模式预设角色组合（5 组专业配板轮转），为空则随机发牌
+	ForceRoles []string `json:"-"`
+
 	// 占卜师的红鲱鱼：一名非恶魔玩家始终被占卜师当作恶魔
 	RedHerringPID string `json:"red_herring_pid"`
 
@@ -989,15 +992,15 @@ func (e *Engine) executeChoice(pid, roleKey string, targets []int) map[string]an
 					e.Notify(p.Number, "🪖 你选择了士兵，但他毫发无伤（士兵免疫恶魔）")
 					return map[string]any{"target": targets[0], "blocked": true}
 				}
-				// 镇长弹刀（官方魔典）：攻击镇长时可能转移给另一名玩家
-				if tp.Role == "mayor" && e.mayorBounce(pidOf(e.GD, tp.Number)) {
-					return map[string]any{"target": targets[0], "bounced": true}
-				}
+			// 镇长弹刀（官方魔典）：攻击镇长时可能转移给另一名玩家
+			if tp.Role == "mayor" && e.mayorBounce(pidOf(e.GD, tp.Number)) {
+				return map[string]any{"target": targets[0], "bounced": true}
+			}
 			tp.Alive = false
 			tp.DeadVote = true // 死亡票
 			e.Notify(tp.Number, "☠️ 你在夜晚死亡")
 			e.markNightDeath(tp.Number)
-				return map[string]any{"target": targets[0]}
+			return map[string]any{"target": targets[0]}
 			}
 		}
 		return e.DoAction(pid, roleKey, e.GD.FirstNight)
@@ -1120,6 +1123,7 @@ func (e *Engine) mayorBounce(mayorPID string) bool {
 	}
 	victim := e.GD.Players[others[rand.Intn(len(others))]]
 	victim.Alive = false
+	victim.DeadVote = true // 死亡票
 	e.Notify(victim.Number, "☠️ 你在夜晚死亡")
 	e.markNightDeath(victim.Number)
 	return true
@@ -1140,6 +1144,7 @@ func (e *Engine) SlayerShoot(num, targetNum int) (bool, string, bool) {
 	p.SlayerUsed = true
 	if t.Team == TeamDemon {
 		t.Alive = false
+		t.DeadVote = true // 死亡票（虽然恶魔死亡通常游戏结束，保持一致）
 		e.maybeInheritImp()
 		return true, t.RoleName, true
 	}
@@ -1212,6 +1217,12 @@ func (e *Engine) becomeImp(heir *PlayerState) {
 	}
 	heir.InfoMinionNums = minions
 	heir.InfoNotInPlay = e.notInPlayTownsfolk(nil)
+	// 其他爪牙的"恶魔编号"同步更新为新恶魔（否则爪牙私聊会找已死的旧恶魔）
+	for _, p := range e.GD.Players {
+		if p.Team == TeamMinion {
+			p.InfoDemonNum = heir.Number
+		}
+	}
 	e.Notify(heir.Number, "😈 你成为了新的小恶魔！")
 	if len(minions) > 0 {
 		e.Notify(heir.Number, "你的爪牙编号: "+joinNums(minions))
@@ -1242,6 +1253,12 @@ func (e *Engine) Nominate(fromNum, targetNum int) map[string]any {
 	// 已有投票进行中：拒绝新提名（先完成当前投票）
 	if e.GD.ActiveVote != nil {
 		return map[string]any{"success": false, "message": "已有提名正在投票中"}
+	}
+	// 提名者本轮只能提名一次：提名权用过即收回
+	for _, rec := range e.GD.Nominations {
+		if rec.FromNumber == fromNum {
+			return map[string]any{"success": false, "message": "你本轮已经提名过了，不能再提名"}
+		}
 	}
 	// 被提名过的玩家无法再次提名
 	for _, rec := range e.GD.Nominations {
@@ -1316,7 +1333,9 @@ func (e *Engine) Nominate(fromNum, targetNum int) map[string]any {
 	}
 }
 
-// StartVoting 辩论结束，开始同时投票倒计时（AI 玩家立即投票，真人倒计时内自由投票/取消）
+// StartVoting 辩论结束，开始同时投票倒计时
+// AI 投票不再在此同步执行（避免 8 个 LLM 决策阻塞事件循环导致投票期被挤掉），
+// 由房间层异步决策后经 ai_vote_resolve 事件回投写票
 func (e *Engine) StartVoting() (map[string]any, bool) {
 	v := e.GD.ActiveVote
 	if v == nil {
@@ -1326,22 +1345,6 @@ func (e *Engine) StartVoting() (map[string]any, bool) {
 		return nil, false // 已在投票中
 	}
 	v.VoteDeadline = time.Now().Add(VoteSeconds * time.Second).Unix()
-	// AI 玩家立即投票（yes 或弃权）；辩论双方（提名者/被提名者）不能投票
-	// 弃权也标记"已表态"（管家主人限制：主人表态后管家即可投票，无论投什么）
-	if v.Stated == nil {
-		v.Stated = map[int]bool{}
-	}
-	for _, p := range e.GD.Players {
-		if p.IsAI && (p.Alive || p.DeadVote) {
-			if c := aiVoteChoice(e, p); c != "abstain" {
-				v.Votes[p.Number] = c
-				if !p.Alive {
-					p.DeadVote = false // 死亡票：投出后没收（仅此一次）
-				}
-			}
-			v.Stated[p.Number] = true
-		}
-	}
 	return map[string]any{
 		"vote_start": true,
 		"from":       v.FromNumber,
@@ -1350,24 +1353,49 @@ func (e *Engine) StartVoting() (map[string]any, bool) {
 	}, false
 }
 
-// aiVoteChoice AI 玩家的投票选择：优先 LLM 先推理后决策，失败回退 50% 随机
-func aiVoteChoice(e *Engine, p *PlayerState) string {
-	if p.AIType == "api" && e.AI != nil && e.GD.ActiveVote != nil {
-		v := e.GD.ActiveVote
-		aliveNums := e.AliveNums(0)
-		if yes, ok := e.AI.DecideVote(e.RoomCode, p.RoleName, v.FromNumber, v.TargetNumber,
-			aliveNums, p.Number, p.LLMConf, e.MyStories(p.Number)); ok {
-			if yes {
-				return "yes"
-			}
-			return "abstain"
+// AI 投票玩家池：存活 AI + 有死亡票的死亡 AI
+func (e *Engine) AIVoters() []*PlayerState {
+	out := []*PlayerState{}
+	for _, p := range e.GD.Players {
+		if p.IsAI && (p.Alive || p.DeadVote) {
+			out = append(out, p)
 		}
 	}
-	if rand.Float64() < 0.5 {
-		return "yes"
-	}
-	return "abstain"
+	return out
 }
+
+// ApplyAIVote 房间层回投 AI 投票结果（事件循环内执行，无竞态）
+func (e *Engine) ApplyAIVote(num int, voteYes bool) {
+	v := e.GD.ActiveVote
+	if v == nil || v.VoteDeadline == 0 {
+		return
+	}
+	if time.Now().Unix() >= v.VoteDeadline {
+		return
+	}
+	if v.Votes == nil {
+		v.Votes = map[int]string{}
+	}
+	if v.Stated == nil {
+		v.Stated = map[int]bool{}
+	}
+	p := e.PlayerByNum(num)
+	if p == nil {
+		return
+	}
+	if voteYes {
+		v.Votes[num] = "yes"
+		if !p.Alive {
+			p.DeadVote = false // 死亡票：投出后没收（仅此一次）
+		}
+	} else {
+		delete(v.Votes, num)
+	}
+	v.Stated[num] = true
+}
+
+// aiVoteChoice 已废弃：AI 投票改为房间层异步决策（DecideVote + ai_vote_resolve 事件回投），
+// 避免 8 个 LLM 决策同步阻塞事件循环
 
 // CastVote 投票倒计时内投票/取消投票（可反复切换意向）
 // choice="yes" 投赞成；choice="abstain" 取消投票（移除自己的票）
@@ -1447,10 +1475,11 @@ func (e *Engine) FinishVote() map[string]any {
 	sort.Ints(unvotedNums)
 	for num, choice := range v.Votes {
 		if choice == "yes" {
-			// 管家票不计入：主人存活且未表态时，管家的赞成票跳过（中毒管家不受限）
+			// 管家票不计入：主人存活且未投赞成时，管家的赞成票跳过（中毒管家不受限）
+			// 主人必须实际投出赞成票，管家票才计入统计（"主人没举手，管家不能算票"）
 			if bp := e.PlayerByNum(num); bp != nil && bp.Role == "butler" && !bp.Poisoned && bp.ButlerMaster != "" {
 				if master := e.GD.Players[bp.ButlerMaster]; master != nil && master.Alive {
-					if _, voted := v.Stated[master.Number]; !voted {
+					if v.Votes[master.Number] != "yes" {
 						continue
 					}
 				}
@@ -1545,8 +1574,9 @@ func (e *Engine) ResolveNominationPeriod() map[string]any {
 			result["message"] = "#" + itoa(best.TargetNumber) + " 已死亡，处决无效果"
 		}
 	}
-	// 周期结束：清空提名记录，允许开启下一轮提名
+	// 周期结束：清空提名记录，允许开启下一轮提名；强制清理活跃投票防残留死锁
 	e.GD.Nominations = nil
+	e.GD.ActiveVote = nil
 	e.GD.NomCooldownUntil = 0
 	return result
 }
@@ -1722,6 +1752,12 @@ func (e *Engine) AssignRoles() {
 	townsfolk := sample(GetRolesByTeam(TeamTownsfolk), tfC)
 	pool := append([]string{"imp"}, append(append(minions, outsiders...), townsfolk...)...)
 	rand.Shuffle(len(pool), func(i, j int) { pool[i], pool[j] = pool[j], pool[i] })
+
+	// 均衡配板：斗蛐蛐观战模式可预设角色组合（5 组专业配板轮转），保证对局均衡可比
+	if len(e.GD.ForceRoles) == len(pool) {
+		pool = append([]string{}, e.GD.ForceRoles...)
+		rand.Shuffle(len(pool), func(i, j int) { pool[i], pool[j] = pool[j], pool[i] })
+	}
 
 	// 体验优化：真人玩家优先拿主动选择型角色（占卜师/管家），提升真人参与感
 	// 角色池重排：NeedsChoice 角色移到前部；玩家序列重排：真人移到前部

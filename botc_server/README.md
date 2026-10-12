@@ -19,14 +19,6 @@ ai_service/start_ai.bat
 
 > 不启动 AI 服务也能玩：夜晚行动自动回退随机策略；API 型 AI 公聊静默跳过。
 
-### 电子斗蛐蛐一键入座（可选）
-
-斗蛐蛐房间的「一键入座 8 智谱 AI」按钮需要本机配置 API Key：
-
-1. 复制 `data/arena_keys.example.json` 为 `data/arena_keys.json`
-2. 填入智谱（bigmodel.cn）API Key 数组（8 个，支持 flash/plus 两档）
-3. 该文件已被 .gitignore 排除，不会提交到仓库
-
 ---
 
 ## 功能清单

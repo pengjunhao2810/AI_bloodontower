@@ -254,6 +254,7 @@
                         <span class="player-num">#{{ p.number }}</span>
                         <span class="player-name">{{ p.number === myNumber ? '你' : (p.is_ai ? (p.ai_model || 'AI 玩家') : p.username) }}</span>
                         <span v-if="watchMode" class="tag tag-yellow">{{ p.role === 'drunk' ? '酒鬼' : p.role_name }}</span>
+                        <span v-if="!watchMode && guessLabels[p.number]" class="tag tag-dim" :title="'你的猜测标注'">猜:{{ guessLabels[p.number] }}</span>
                         <span class="player-status" :class="p.alive ? 'alive' : 'dead'">{{ p.alive ? '存活' : '死亡' }}</span>
                     </div>
                 </div>
@@ -374,11 +375,18 @@
                     </div>
                     </template>
                 </div>
+                <div v-if="atMenuVisible && !activePrivateTarget" class="night-tip-box" style="margin-top:8px;padding:8px;border-color:#a5aef0;">
+                    <div class="hint" style="margin-bottom:6px;">@ 提及玩家（点击插入）</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                        <button v-for="p in sortedPlayers.filter(x => x.number !== myNumber)" :key="'at'+p.number"
+                                class="btn btn-sm" @click="insertAt(p)">#{{ p.number }}</button>
+                    </div>
+                </div>
                 <div v-if="!watchMode" style="display:flex;gap:10px;margin-top:14px;">
                     <input class="input" v-model="gameChatText" maxlength="500"
                            :disabled="!canSpeakNow"
-                           :placeholder="activePrivateTarget ? '私聊 #' + activePrivateTarget + '，回车发送（仅对方可见）' : (game && game.phase === 'night' ? '黑夜中，不可发言…' : (canSpeakNow ? '输入发言，回车发送…' : '辩论中，仅提名者和被提名者可以发言'))"
-                           style="flex:1;" @keyup.enter="sendGameMsg">
+                           :placeholder="activePrivateTarget ? '私聊 #' + activePrivateTarget + '，回车发送（仅对方可见）' : (game && game.phase === 'night' ? '黑夜中，不可发言…' : (canSpeakNow ? '输入发言，回车发送（@ 可提及玩家）…' : '辩论中，仅提名者和被提名者可以发言'))"
+                           style="flex:1;" @keyup.enter="sendGameMsg" @input="onChatInput">
                     <button class="btn" style="flex-shrink:0;" :disabled="!canSpeakNow"
                             :style="recording ? 'border-color:#ee9aa4;color:#ee9aa4;' : ''"
                             @click="startVoice(activePrivateTarget ? 'private' : 'game')" title="语音输入">{{ recording ? '🔴 停止' : '🎤' }}</button>
@@ -450,6 +458,10 @@
                 </div>
                 <button class="btn btn-primary btn-sm" @click="exportArenaRecord">📄 导出 Word</button>
             </div>
+            <div v-if="arenaRecord && arenaRecord.recap" class="night-tip-box" style="border-color:#e8b23c;">
+                <div class="card-title">📜 说书人复盘（AI）</div>
+                <div class="body-text" style="color:var(--fg);line-height:1.7;">{{ arenaRecord.recap }}</div>
+            </div>
             <div>
                 <div class="label-mono" style="margin-bottom:6px;">🎭 角色状态</div>
                 <div v-for="p in Object.values(arenaRecord.players || {})" :key="p.number" style="font-size:13px;padding:3px 0;">
@@ -482,6 +494,16 @@
             </div>
         </div>
         <div v-else class="hint">加载中…</div>
+    </el-dialog>
+
+    <!-- 猜角色标注菜单 -->
+    <el-dialog :model-value="!!guessMenuFor" title="🔍 标注猜测角色" width="360px" :modal="true" :show-close="false" @close="guessMenuFor = null">
+        <div v-if="guessMenuFor" class="hint" style="margin-bottom:10px;">为 #{{ guessMenuFor.number }} 记录你的猜测（仅自己可见）</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+            <button v-for="r in ['小恶魔','投毒者','间谍','红唇女郎','男爵','酒鬼','陌客','圣徒','管家','洗衣妇','图书管理员','调查员','厨师','共情者','占卜师','送葬者','僧侣','守鸦人','贞洁者','猎手','士兵','镇长']"
+                    :key="'g'+r" class="btn btn-sm" @click="setGuess(r)">{{ r }}</button>
+            <button class="btn btn-sm" style="border-color:#ee9aa4;color:#ee9aa4;" @click="setGuess('clear')">清除标注</button>
+        </div>
     </el-dialog>
 
     <!-- 猎手开枪弹窗（真人玩家技能） -->
@@ -661,16 +683,6 @@
         </button>
         <div style="display:flex;gap:8px;margin-top:8px;">
             <button class="btn" style="flex:1;" @click="fillAndStart" title="点一下添加 1 个本地假人">🧑‍🤝‍🧑 ＋ 添加假人</button>
-        </div>
-        <div style="margin-top:12px;border-top:1px solid #3a3f4b;padding-top:12px;">
-            <div class="label-mono" style="margin-bottom:6px;">⚔️ 一键添加 8 个智谱 AI（斗蛐蛐测试用）</div>
-            <div style="display:flex;gap:8px;align-items:center;">
-                <button class="btn btn-sm" :class="{ 'btn-primary': arenaVersion === 'flash' }" @click="arenaVersion='flash'">低级 flash</button>
-                <button class="btn btn-sm" :class="{ 'btn-primary': arenaVersion === 'plus' }" @click="arenaVersion='plus'">高级 plus</button>
-                <button class="btn btn-primary btn-sm" style="flex:1;" :disabled="arenaBusy" @click="addArenaAIs">
-                    {{ arenaBusy ? '添加中…' : '一键入座 8 个' }}
-                </button>
-            </div>
         </div>
         <div class="hint" style="margin-top:6px;">
             {{ llmForm.provider === 'ollama' ? 'Ollama 本地模型：本机安装 Ollama 并运行 ollama run qwen2.5:7b 后即可免费离线使用' : '一个 Key 可添加多个 AI 座位（不同座位可以用不同模型，形成"多源混战"）；假人是不花 Token 的本地 AI，适合快速凑人数' }}
