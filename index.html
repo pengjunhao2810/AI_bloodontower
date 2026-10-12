@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>血染钟楼 · 暗流涌动 — 在线桌游平台</title>
+<style>
+:root{
+  --bg:#0e0e11; --bg2:#15161c; --card:#1a1c24; --line:#2a2f3c;
+  --fg:#e8e9f0; --dim:#8b93a7; --accent:#7a8cff; --gold:#e8b23c; --red:#ee7f8f; --green:#7ecb9c;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;line-height:1.7}
+a{color:var(--accent);text-decoration:none}
+.wrap{max-width:1060px;margin:0 auto;padding:0 24px}
+/* hero */
+.hero{position:relative;text-align:center;padding:110px 0 80px;overflow:hidden;
+  background:radial-gradient(ellipse at 50% 0%,rgba(122,140,255,.16),transparent 60%),
+             radial-gradient(ellipse at 80% 100%,rgba(232,178,60,.08),transparent 55%)}
+.hero h1{font-size:52px;letter-spacing:6px;margin-bottom:14px}
+.hero h1 .moon{color:var(--gold)}
+.hero p.sub{color:var(--dim);font-size:18px;margin-bottom:38px}
+.hero .badges{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:42px}
+.badge{border:1px solid var(--line);border-radius:20px;padding:6px 16px;font-size:13px;color:var(--dim);background:rgba(255,255,255,.02)}
+.badge b{color:var(--fg)}
+.btns{display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-block;padding:13px 30px;border-radius:26px;font-size:15px;border:1px solid var(--line);transition:.2s}
+.btn-primary{background:linear-gradient(135deg,#6a7bff,#8a5cff);border-color:transparent;color:#fff;font-weight:600}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(122,140,255,.35)}
+.btn-ghost{color:var(--fg)}
+.btn-ghost:hover{border-color:var(--accent)}
+/* sections */
+section{padding:72px 0}
+h2{font-size:30px;text-align:center;margin-bottom:14px;letter-spacing:2px}
+h2 small{display:block;font-size:14px;color:var(--dim);font-weight:400;letter-spacing:1px;margin-top:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px;margin-top:40px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px;transition:.2s}
+.card:hover{border-color:var(--accent);transform:translateY(-3px)}
+.card .icon{font-size:30px;margin-bottom:12px}
+.card h3{font-size:17px;margin-bottom:8px}
+.card p{color:var(--dim);font-size:14px}
+/* shots */
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px;margin-top:40px}
+.shot{border:2px dashed var(--line);border-radius:14px;background:var(--bg2);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;padding:52px 20px;text-align:center;color:var(--dim)}
+.shot .ph{font-size:38px;margin-bottom:12px}
+.shot b{color:var(--fg);display:block;margin-bottom:6px}
+/* flow */
+.flow{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:40px}
+.step{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 20px;text-align:center;min-width:110px}
+.step .e{font-size:24px}
+.step .t{font-size:14px;margin-top:6px}
+.arrow{color:var(--gold);font-size:20px;align-self:center}
+/* table */
+table{width:100%;border-collapse:collapse;margin-top:36px;font-size:14px}
+th,td{border:1px solid var(--line);padding:10px 14px;text-align:left}
+th{background:var(--bg2);color:var(--gold);font-weight:600}
+td{color:var(--dim)}
+td b{color:var(--fg)}
+/* timeline */
+.tl{max-width:760px;margin:40px auto 0;border-left:2px solid var(--line);padding-left:30px}
+.tl .item{position:relative;margin-bottom:28px}
+.tl .item::before{content:'';position:absolute;left:-37px;top:8px;width:12px;height:12px;border-radius:50%;
+  background:var(--gold);box-shadow:0 0 10px var(--gold)}
+.tl .v{font-weight:700;color:var(--gold);font-size:16px}
+.tl p{color:var(--dim);font-size:14px;margin-top:4px}
+footer{text-align:center;padding:50px 0;color:var(--dim);font-size:13px;border-top:1px solid var(--line)}
+@media(max-width:640px){.hero h1{font-size:34px;letter-spacing:3px}}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="wrap">
+    <h1>血染钟楼 <span class="moon">·</span> 暗流涌动</h1>
+    <p class="sub">真人玩家 × 大模型 AI 的多人在线社交推理桌游平台</p>
+    <div class="badges">
+      <span class="badge"><b>22</b> 角色完整剧本</span>
+      <span class="badge"><b>9</b> 家模型服务商</span>
+      <span class="badge"><b>5-12</b> 人混合对局</span>
+      <span class="badge">电子斗蛐蛐观战</span>
+      <span class="badge">Go + Python + Vue3</span>
+    </div>
+    <div class="btns">
+      <a class="btn btn-primary" href="https://github.com/pengjunhao2810/AI_bloodontower">查看源码</a>
+      <a class="btn btn-ghost" href="#readme">项目文档</a>
+    </div>
+  </div>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>核心亮点<small>从纯 AI 模拟器演进为完整的在线桌游平台</small></h2>
+    <div class="grid">
+      <div class="card"><div class="icon">👥</div><h3>真人在线联机</h3><p>WebSocket 房间制，任意比例真人+AI 混合对局；好友系统、战绩、排行榜一应俱全</p></div>
+      <div class="card"><div class="icon">🤖</div><h3>大模型 AI 玩家</h3><p>四层 Prompt、笔记记忆、先推理后决策、沉默权、复读抑制——AI 会记仇、会盘逻辑、会战术配合</p></div>
+      <div class="card"><div class="icon">🕶️</div><h3>电子斗蛐蛐</h3><p>房主不占座纯 AI 对战，上帝视角看私聊/技能/真实角色，赛后 AI 复盘一键导出 Word</p></div>
+      <div class="card"><div class="icon">🎭</div><h3>22 角色完整规则</h3><p>红唇女郎继承、恶魔自杀传位、酒鬼伪装、红鲱鱼、镇长弹刀、死亡票……官方剧本全量还原</p></div>
+      <div class="card"><div class="icon">⚔️</div><h3>智能体竞技场</h3><p>每个座位独立配置模型——恶魔用 GPT、镇民用本地 Ollama，同场竞技对比</p></div>
+      <div class="card"><div class="icon">🛡️</div><h3>规则硬引擎</h3><p>Go 引擎确定性裁决：中毒时序、夜晚顺序、提名投票、胜负判定——零随机漂移</p></div>
+    </div>
+  </div>
+</section>
+
+<section style="background:var(--bg2)">
+  <div class="wrap">
+    <h2>界面一览<small>替换下方占位框为实际游戏截图</small></h2>
+    <div class="shots">
+      <div class="shot"><span class="ph">🖼️</span><b>对局主界面</b>环形座位 · 公聊时间轴 · 投票卡片</div>
+      <div class="shot"><span class="ph">🖼️</span><b>私聊会话</b>一对一密谈 · AI 收尾离场</div>
+      <div class="shot"><span class="ph">🖼️</span><b>电子斗蛐蛐</b>上帝视角 · 私聊监控 · 说书人记录</div>
+      <div class="shot"><span class="ph">🖼️</span><b>对局复盘</b>角色状态 · AI 说书人回顾 · 导出 Word</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>玩法流程<small>每一局都是真实的社交推理</small></h2>
+    <div class="flow">
+      <div class="step"><div class="e">🌙</div><div class="t">夜晚行动</div></div><span class="arrow">→</span>
+      <div class="step"><div class="e">🤫</div><div class="t">私聊密谈</div></div><span class="arrow">→</span>
+      <div class="step"><div class="e">💬</div><div class="t">公聊讨论</div></div><span class="arrow">→</span>
+      <div class="step"><div class="e">🗳️</div><div class="t">提名投票</div></div><span class="arrow">→</span>
+      <div class="step"><div class="e">⚔️</div><div class="t">处决 / 平安日</div></div><span class="arrow">→</span>
+      <div class="step"><div class="e">🌙</div><div class="t">入夜循环</div></div>
+    </div>
+    <table>
+      <tr><th>环节</th><th>真人玩家</th><th>AI 玩家</th></tr>
+      <tr><td><b>夜晚</b></td><td>信息位/功能位收到技能卡片，点选目标</td><td>LLM 先推理后决策：刀人/保护/查验/下毒</td></tr>
+      <tr><td><b>私聊</b></td><td>点座位发起邀请，AI 会自己决定接不接受</td><td>战术交流：恶魔分配伪装身份、间谍报魔典</td></tr>
+      <tr><td><b>公聊</b></td><td>打字发言，@ 可点名；没话说就沉默</td><td>三种开口模式：报信息 / 明确保留 / 信息链条推理</td></tr>
+      <tr><td><b>提名</b></td><td>每人一次提名权，20 秒辩论 + 20 秒投票</td><td>提名前 LLM 推理目标与理由</td></tr>
+      <tr><td><b>处决</b></td><td>票数过半且最高者处决；平票平安日</td><td>死人保留一张死亡票，投出即没收</td></tr>
+    </table>
+  </div>
+</section>
+
+<section style="background:var(--bg2)">
+  <div class="wrap">
+    <h2>技术架构<small>异构微服务：游戏逻辑与 AI 推理彻底解耦</small></h2>
+    <div class="grid">
+      <div class="card"><div class="icon">🐹</div><h3>Go 游戏主服务</h3><p>Gin + gorilla/websocket + GORM/SQLite<br>每房间一个 Actor goroutine，事件串行免锁<br>22 角色规则引擎，纯内存确定性裁决</p></div>
+      <div class="card"><div class="icon">🐍</div><h3>Python AI 服务</h3><p>Flask 推理服务，HTTP 解耦<br>发言/决策/笔记/人格/战术/检测全量实现<br>任意 OpenAI 兼容 API，座位级模型配置</p></div>
+      <div class="card"><div class="icon">🖥️</div><h3>Vue3 前端</h3><p>单页应用，纯 WebSocket 通信无轮询<br>本地化 vendor，断线重连与刷新恢复<br>观战模式三栏上帝视角</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>版本演进<small>从 4000 行 Python 模拟器到微服务在线平台</small></h2>
+    <div class="tl">
+      <div class="item"><div class="v">V1 经典版</div><p>Python Flask 单机 AI 对局模拟，22 角色规则引擎雏形</p></div>
+      <div class="item"><div class="v">V2 增强版</div><p>4 种人格系统 + REINFORCE 策略训练，发言拟人化</p></div>
+      <div class="item"><div class="v">V3 独立版</div><p>16 项规则硬约束 + 信息交叉投票 + Word 导出</p></div>
+      <div class="item"><div class="v">V4 精简版</div><p>移除训练系统，精简代码结构</p></div>
+      <div class="item"><div class="v">V5 Go 重构版（当前）</div><p>Go 微服务 + Python AI 推理 + Vue3 前端：真人联机、混合对局、多模型竞技场、观战模式、AI 笔记记忆体系</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="readme" style="background:var(--bg2)">
+  <div class="wrap" style="text-align:center">
+    <h2>想了解更多？<small>完整的功能清单、开发问题与解决、部署指南都在 README 里</small></h2>
+    <div class="btns" style="margin-top:36px">
+      <a class="btn btn-primary" href="https://github.com/pengjunhao2810/AI_bloodontower/blob/main/README.md">阅读完整 README</a>
+      <a class="btn btn-ghost" href="https://github.com/pengjunhao2810/AI_bloodontower">GitHub 仓库</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  血染钟楼 · 暗流涌动 — 基于桌游《Blood on the Clocktower》的同人学习项目，仅供个人学习研究
+</footer>
+
+</body>
+</html>
