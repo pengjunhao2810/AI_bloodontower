@@ -46,12 +46,25 @@ type Room struct {
 	abandonedAt      time.Time // 最后一个真人离线的时刻（空置清理用）
 	aiBusy           bool      // AI 发言请求在途标记（防止并发与堆积）
 	WatchMode        bool      // 电子斗蛐蛐观战模式：房主不占座位，上帝视角看全部私聊/技能/角色
+	Drama            bool      // 剧本演绎模式：1 真人 + AI 导演扮演全场 NPC，朝最戏剧性方向演绎
 	lastAutoPhase    string    // 斗蛐蛐自动推进：上次记录的阶段
 	phaseEnteredAt   time.Time // 斗蛐蛐自动推进：进入当前阶段的时刻
 	speakCounts      map[int]int // AI 发言次数计数（防车轱辘刷屏：每阶段每人最多 3 次公聊）
 	speakCountsPhase string      // 发言计数对应的阶段
 	speakTurn        int         // 公聊轮转指针：轮流给每个 AI 发言机会（轮到后由 AI 自己决定说话或沉默）
 	debateSpoken     map[int]bool // 辩论期已发言的 AI（每个提名轮次重置）
+
+	// 对局质量统计（源自王伟对抗性测试指标：身份隐藏度/逻辑连贯性/策略有效性）
+	executedLog []execRecord // 处决历史（对局结束统计处决命中率）
+}
+
+// execRecord 一次生效处决（真正导致玩家死亡）
+type execRecord struct {
+	Number int    `json:"number"` // 被处决玩家编号
+	Role   string `json:"role"`   // 被处决玩家角色 key
+	Team   string `json:"team"`   // 被处决玩家阵营
+	Day    int    `json:"day"`    // 第几天（0 起）
+	Cause  string `json:"cause"`  // execute/saint/virgin/slayer
 }
 
 // PrivateMsg 私聊消息（仅收发双方，GameLog 归档?
@@ -280,14 +293,14 @@ func (r *Room) handle(ev Event) {
 		r.onRemoveAI(ev, reply)
 	case "set_seats":
 		r.onSetSeats(ev, reply)
+	case "set_drama":
+		r.onSetDrama(ev, reply)
 	case "start":
 		r.onStart(ev, reply)
 	case "leave":
 		r.onLeave(ev, reply)
 	case "kick":
 		r.onKick(ev, reply)
-	case "fill_bots":
-		r.onFillBots(ev, reply)
 	case "game_chat":
 		r.onGameChat(ev, reply)
 	case "next_phase":
@@ -547,6 +560,7 @@ func (r *Room) resetToWaiting() {
 	r.eng = nil
 	r.pubMsgs = nil
 	r.privMsgs = nil
+	r.executedLog = nil
 	r.stories = make(map[int][]string)
 	r.abandonedAt = time.Time{}
 	r.mgr.DB.Model(&model.Room{}).Where("room_code = ?", r.Code).
@@ -589,31 +603,6 @@ func (r *Room) onKick(ev Event, reply func(bool, string, map[string]any)) {
 		}
 	}
 	reply(false, "盠不在房间", nil)
-}
-
-// onFillBots 房主锡充假人凑人数：将 AI 座位补满到定人数（至少 5 人可?
-func (r *Room) onFillBots(ev Event, reply func(bool, string, map[string]any)) {
-	if ev.UserID != r.HostID || r.Status != "waiting" {
-		reply(false, "叜房主能添加假", nil)
-		return
-	}
-	target := r.MaxPlayers
-	if target < 5 {
-		target = 5
-	}
-	added := 0
-	for r.freeSeat() >= 0 && len(r.seats) < target {
-		seat := r.freeSeat()
-		r.seats[seat] = &Seat{Number: seat, Username: "AI-" + itoa(seat), IsAI: true, AIType: "local", IsReady: true}
-		added++
-	}
-	if added == 0 {
-		reply(false, "房间已满", nil)
-		return
-	}
-	r.syncSeatsDB()
-	r.broadcast("room.state", r.stateSnapshot())
-	reply(true, "", map[string]any{"added": added})
 }
 
 func (r *Room) nextHuman() *Seat {
@@ -750,6 +739,51 @@ func (r *Room) onSetSeats(ev Event, reply func(bool, string, map[string]any)) {
 	reply(true, "", map[string]any{"max_players": m})
 }
 
+// onSetDrama 房主在等待阶段切换剧本演绎模式（创建房间后可在设置里随时开关）
+// 电子斗蛐蛐（纯 AI 观战，无真人主角）不支持剧本演绎
+func (r *Room) onSetDrama(ev Event, reply func(bool, string, map[string]any)) {
+	if ev.UserID != r.HostID || r.Status != "waiting" {
+		reply(false, "仅房主可在等待阶段切换", nil)
+		return
+	}
+	if r.WatchMode {
+		reply(false, "电子斗蛐蛐不支持剧本演绎模式", nil)
+		return
+	}
+	on, _ := ev.Data["on"].(bool)
+	r.Drama = on
+	r.mgr.DB.Model(&model.Room{}).Where("room_code = ?", r.Code).Update("drama", on)
+	// 同步 AI 客户端的 drama 房间标记（否则关闭后重开对局仍走导演大脑）
+	r.mgr.AI.SetRoomDrama(r.Code, on)
+	r.broadcast("room.state", r.stateSnapshot())
+	reply(true, "", map[string]any{"drama": r.Drama})
+}
+
+// unifyAllLLM 剧本演绎模式：统一房间内所有 AI 座位的大模型配置
+// （导演大脑扮演全场 NPC，所有 NPC 请求走同一最强模型）
+func (r *Room) unifyAllLLM() {
+	if r.game == nil {
+		return
+	}
+	conf := ""
+	for _, p := range r.game.Players {
+		if p.IsAI && p.AIType == "api" && p.LLMConf != "" {
+			conf = p.LLMConf
+			break
+		}
+	}
+	if conf == "" {
+		return
+	}
+	for _, p := range r.game.Players {
+		if p.IsAI && p.AIType == "api" {
+			p.LLMConf = conf
+			p.AIModel = ModelFromLLMConfig(conf)
+		}
+	}
+	log.Printf("[drama] room=%s 统一导演大脑 LLM: %s", r.Code, ModelFromLLMConfig(conf))
+}
+
 // ==============================
 //
 // ==============================
@@ -828,6 +862,14 @@ func (r *Room) onStart(ev Event, reply func(bool, string, map[string]any)) {
 	r.privateInvites = map[int]int{}
 	r.privateSessions = map[int]map[int]bool{}
 	r.eng.StartGame()
+	// 剧本演绎模式：注册 drama 房间，并统一所有 AI 座位的 LLM 配置（导演大脑扮演全场 NPC）
+	if r.Drama {
+		r.mgr.AI.SetRoomDrama(r.Code, true)
+		r.unifyAllLLM()
+	} else {
+		// 非剧本房间：确保 drama 标记清除（房主上一局开启后关闭的残留）
+		r.mgr.AI.SetRoomDrama(r.Code, false)
+	}
 	r.drainStories()
 
 	r.pubMsgs = nil
@@ -1099,6 +1141,7 @@ func (r *Room) onAINominate(ev Event) {
 	// 猎手开枪特判：引擎已执行射击（射偏/命中），播报开枪结果，不走正常提名流程
 	if sp, _ := result["special"].(string); sp == "slayer" {
 		if result["game_over"] == true {
+			r.recordExecution(target, "slayer")
 			r.pubSystem("🔫 #" + itoa(p.Number) + " 声称猎手对 #" + itoa(target) + " 开枪。他就是恶魔，当场死亡！")
 			r.mgr.AI.SessionEvent(r.Code, "第"+itoa(r.game.Day+1)+"天：猎手 #"+itoa(p.Number)+" 声称猎手对 #"+itoa(target)+"，恶魔死亡，游戏结束")
 			r.broadcast("game.nominate", result)
@@ -1115,6 +1158,7 @@ func (r *Room) onAINominate(ev Event) {
 	}
 	// 贞洁者触发：提名者被立即处决
 	if sp, _ := result["special"].(string); sp == "virgin" {
+		r.recordExecution(p.Number, "virgin")
 		if msg, ok := result["message"].(string); ok {
 			r.pubSystem("⚡ " + msg)
 		}
@@ -2105,11 +2149,38 @@ func (r *Room) checkVoteTimeout() {
 	}
 }
 
+// recordExecution 记录一次生效处决（对局质量统计用）
+func (r *Room) recordExecution(num int, cause string) {
+	if r.game == nil {
+		return
+	}
+	p := r.game.Players[pidOfNum(r.game, num)]
+	if p == nil {
+		return
+	}
+	r.executedLog = append(r.executedLog, execRecord{
+		Number: num, Role: p.Role, Team: p.Team, Day: r.game.Day, Cause: cause,
+	})
+}
+
 // resolveNominationPeriod 提名周期结束：比对票??处决（入夜）或无人决（吖轏名）
 func (r *Room) resolveNominationPeriod() {
 	result := r.eng.ResolveNominationPeriod()
 	if result == nil {
 		return
+	}
+	// 生效处决记录：提名处决导致存活玩家死亡才算数（提名死人无实际效果不记）
+	if result["executed"] == true {
+		if t, ok := result["target"].(float64); ok {
+			p := r.game.Players[pidOfNum(r.game, int(t))]
+			if p != nil && !p.Alive {
+				cause := "execute"
+				if p.Role == "saint" {
+					cause = "saint"
+				}
+				r.recordExecution(int(t), cause)
+			}
+		}
 	}
 	// 处决判定结果由前?nominate_result 系统卡片渲染，不发裸文本
 	r.broadcast("game.nominate_result", result)
@@ -2237,6 +2308,74 @@ func (r *Room) onEnd(ev Event, reply func(bool, string, map[string]any)) {
 	reply(true, "", nil)
 }
 
+// buildGameStats 对局质量统计（源自王伟对抗性测试指标与邱开杰阵营胜率指标）
+// 三项核心指标：处决命中率（策略有效性）、恶魔伪装存活（身份隐藏度）、阵营发言活跃度
+func (r *Room) buildGameStats(winner string) map[string]any {
+	totalDays := r.game.Day + 1
+	if totalDays < 1 {
+		totalDays = 1
+	}
+	executions := len(r.executedLog)
+	evilExecuted := 0
+	for _, e := range r.executedLog {
+		if e.Team == "minion" || e.Team == "demon" {
+			evilExecuted++
+		}
+	}
+	demonSurvived := false
+	aiCount := 0
+	totalPlayers := 0
+	evilAlive := 0
+	for _, p := range r.game.Players {
+		totalPlayers++
+		if p.IsAI {
+			aiCount++
+		}
+		if p.Role == "imp" || p.Role == "scarlet_woman" {
+			if p.Alive {
+				demonSurvived = true
+			}
+		}
+		if (p.Team == "minion" || p.Team == "demon") && p.Alive {
+			evilAlive++
+		}
+	}
+	goodSpeeches, evilSpeeches := 0, 0
+	for _, m := range r.pubMsgs {
+		if m.Number == 0 {
+			continue
+		}
+		p := r.game.Players[pidOfNum(r.game, m.Number)]
+		if p == nil {
+			continue
+		}
+		if p.Team == "minion" || p.Team == "demon" {
+			evilSpeeches++
+		} else {
+			goodSpeeches++
+		}
+	}
+	stats := map[string]any{
+		"winner":            winner,
+		"total_players":     totalPlayers,
+		"ai_players":        aiCount,
+		"total_days":        totalDays,
+		"executions":        executions,
+		"evil_executed":     evilExecuted,
+		"execution_accuracy": func() float64 {
+			if executions == 0 {
+				return 0
+			}
+			return float64(evilExecuted) / float64(executions)
+		}(),
+		"demon_survived": demonSurvived,
+		"evil_alive_end": evilAlive,
+		"good_speeches":  goodSpeeches,
+		"evil_speeches":  evilSpeeches,
+	}
+	return stats
+}
+
 // finishGame 对局结束：归档日??复位座位 ?广播
 func (r *Room) finishGame(winner string) {
 	if r.game == nil {
@@ -2272,6 +2411,8 @@ func (r *Room) finishGame(winner string) {
 	for uid := range uidSet {
 		uids += itoa(int(uid)) + ","
 	}
+	stats := r.buildGameStats(winner)
+	statsJSON, _ := json.Marshal(stats)
 	r.mgr.DB.Create(&model.GameLog{
 		RoomCode:    r.Code,
 		HostID:      r.HostID,
@@ -2285,6 +2426,7 @@ func (r *Room) finishGame(winner string) {
 		Stories:     string(storiesJSON),
 		Actions:     string(actionsJSON), // 夜晚选择方式日志：manual/timeout/ai
 		PrivateMsgs: string(privJSON),    // 私聊日志（仅归档，不对玩家广撼
+		Stats:       string(statsJSON),   // 对局质量统计（处决命中率/恶魔伪装度/发言活跃度）
 	})
 
 	// 赛后 AI 复盘：异步生成说书人视角回顾，写回对局记录（不阻塞结算）
@@ -2321,7 +2463,7 @@ func (r *Room) finishGame(winner string) {
 		model.GrantGameReward(r.mgr.DB, p.UserID, won)
 	}
 
-	r.broadcast("game.over", map[string]any{"winner": winner})
+	r.broadcast("game.over", map[string]any{"winner": winner, "stats": stats})
 	// 对局生命周期信号：结束时清空 AI 笔记，让 AI"停止扮演"（异步，不阻塞结算）
 	go func() {
 		defer func() { _ = recover() }()
@@ -2334,6 +2476,7 @@ func (r *Room) finishGame(winner string) {
 	r.eng = nil
 	r.pubMsgs = nil
 	r.privMsgs = nil
+	r.executedLog = nil
 	r.stories = make(map[int][]string)
 	r.mgr.DB.Model(&model.Room{}).Where("room_code = ?", r.Code).
 		Updates(map[string]any{"status": "waiting", "game_data": ""})
@@ -2479,14 +2622,19 @@ func (r *Room) aiAutoChat() {
 	}
 	sort.Slice(aliveAIs, func(i, j int) bool { return aliveAIs[i].Number < aliveAIs[j].Number })
 	sort.Slice(deadAIs, func(i, j int) bool { return deadAIs[i].Number < deadAIs[j].Number })
-	allAIs := append(aliveAIs, deadAIs...)
-	if len(allAIs) == 0 {
+	// 轮转池：默认只轮存活 AI（死者多半沉默，占名额会拖慢公聊节奏）；
+	// 每 4 个 tick 留 1 个给死亡 AI（守鸦人等死后信息需要出口）
+	pool := aliveAIs
+	if len(deadAIs) > 0 && r.speakTurn%4 == 3 {
+		pool = append(append([]*engine.PlayerState{}, aliveAIs...), deadAIs...)
+	}
+	if len(pool) == 0 {
 		return
 	}
 	// 轮转最多一圈找未达上限的 AI
 	var speaker *engine.PlayerState
-	for i := 0; i < len(allAIs); i++ {
-		cand := allAIs[r.speakTurn%len(allAIs)]
+	for i := 0; i < len(pool); i++ {
+		cand := pool[r.speakTurn%len(pool)]
 		r.speakTurn++
 		if r.speakCounts[cand.Number] < 3 {
 			speaker = cand
@@ -2660,7 +2808,13 @@ func (r *Room) aiAutoPrivate() {
 			alive = append(alive, p)
 		}
 	}
+	// 削峰：每 tick 最多建立 2 个新私聊会话（智谱免费 key 组织级并发约 5-6，
+	// 8 AI 同时建会话会瞬间打满并发限制导致请求排队挂起、公聊/提名阶段全部饿死）
+	newSessions := 0
 	for _, p := range r.game.Players {
+		if newSessions >= 2 {
+			break
+		}
 		if !p.IsAI || p.AIType != "api" {
 			continue
 		}
@@ -2673,20 +2827,48 @@ func (r *Room) aiAutoPrivate() {
 		if len(r.privateSessions[p.Number]) > 0 {
 			continue
 		}
-		if isEvil {
-			// 邪恶方必找队友；首夜后的第一个私聊阶段 100% 先碰头（统一口径仪式感）
-			if r.game.Day == 0 {
-				// 第一天：无概率，必找队友
-			} else if rand.Float64() > 0.7 {
-				continue
-			}
-		} else {
-			if rand.Float64() > 0.3 {
-				continue
-			}
-		}
-		if len(alive) < 2 {
+		if isEvil && r.game.Day == 0 {
+			// 第一天：邪恶方 100% 必找队友碰头（统一口径仪式感）
+		} else if len(alive) < 2 {
 			return
+		} else {
+			// 动态发起概率：按存活 API AI 数量查表，保证每 tick 至少一人发起私聊的概率 ≥ 85%
+			// （固定 30% 概率在 3 人残局时全员连续跳过，导致整个私聊阶段静默）
+			apiAlive := 0
+			for _, q := range r.game.Players {
+				if q.IsAI && q.AIType == "api" && q.Alive {
+					apiAlive++
+				}
+			}
+			pBase := 0.21
+			switch apiAlive {
+			case 1:
+				pBase = 0.85
+			case 2:
+				pBase = 0.61
+			case 3:
+				pBase = 0.47
+			case 4:
+				pBase = 0.38
+			case 5:
+				pBase = 0.32
+			case 6:
+				pBase = 0.27
+			case 7:
+				pBase = 0.24
+			}
+			// 保底：私聊阶段进入 24 秒后仍无任何活跃会话 → 强制发起（不受概率拦截）
+			force := time.Since(r.phaseEnteredAt) >= 24*time.Second && len(r.privateSessions) == 0
+			pLimit := pBase
+			if isEvil {
+				pLimit = pBase * 1.4
+				if pLimit > 0.9 {
+					pLimit = 0.9
+				}
+			}
+			if !force && rand.Float64() > pLimit {
+				continue
+			}
 		}
 		var target *engine.PlayerState
 		// 邪恶方 AI 优先私聊已知队友（恶魔→爪牙、爪牙→恶魔），保证战术沟通及时
@@ -2722,15 +2904,20 @@ func (r *Room) aiAutoPrivate() {
 			continue
 		}
 		r.privateInvites[target.Number] = p.Number
-		if target.IsAI {
-			// AI 盠：自动接?
+		if target.IsAI && !r.Drama {
+			// AI 盠：自动接?（剧本演绎模式下 AI 与 AI 不再私聊——导演大脑信息天然共享，只找真人演对手戏）
 			r.establishSession(p.Number, target.Number)
 			delete(r.privateInvites, target.Number)
 			// 发起邀请的 AI 主动开口（开场白），否则双方会话建立后全程沉默
 			r.aiPrivateFirstLine(p, target)
+			newSessions++
+		} else if target.IsAI && r.Drama {
+			// 剧本演绎模式：跳过 AI↔AI 会话，释放邀请位
+			delete(r.privateInvites, target.Number)
 		} else {
 			// 真人盠：推送邀?
 			r.mgr.Hub.SendToUser(target.UserID, "game.private_invite", map[string]any{"from_number": p.Number})
+			newSessions++
 		}
 	}
 }
@@ -2799,6 +2986,7 @@ func (r *Room) stateSnapshot() map[string]any {
 			"player_count": len(r.seats),
 			"all_ready":    allReady,
 			"players":      players,
+			"drama":        r.Drama,
 		},
 		"messages": msgs,
 	}

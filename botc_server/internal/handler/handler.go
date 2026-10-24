@@ -854,16 +854,21 @@ func (h *Handler) ArenaCreate(c *gin.Context) {
 }
 
 // CreateRoom 创建房间（HTTP 仅做入口，状态全在房间 Actor）
+// 支持剧本演绎模式：POST body {"drama": true} → 1 真人 + AI 导演扮演全场 NPC
 func (h *Handler) CreateRoom(c *gin.Context) {
 	u := CurrentUser(c, h.DB)
 	if u == nil {
 		Fail(c, 401, "未登录")
 		return
 	}
+	var req struct {
+		Drama bool `json:"drama"`
+	}
+	_ = c.ShouldBindJSON(&req)
 	code := genRoomCode(h.DB)
-	r := h.Mgr.Create(code, u.ID, u.Username)
+	r := h.Mgr.Create(code, u.ID, u.Username, req.Drama)
 	OK(c, gin.H{"room": gin.H{
-		"room_code": r.Code, "host_id": r.HostID, "max_players": r.MaxPlayers,
+		"room_code": r.Code, "host_id": r.HostID, "max_players": r.MaxPlayers, "drama": r.Drama,
 	}})
 }
 

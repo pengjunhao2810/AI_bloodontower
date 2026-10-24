@@ -18,6 +18,7 @@ type Config struct {
 	RoomCodeLength     int
 	AIChateIntervalSec int
 	HumanChoiceEnabled bool
+	Drama              bool // 剧本演绎模式：1 真人 + 1 AI 导演扮演全场 NPC，朝最戏剧性方向演绎
 }
 
 // C 全局配置实例
@@ -29,7 +30,7 @@ var C = &Config{
 	MinPlayersPerRoom:  5,
 	MaxPlayersPerRoom:  12, // 暗流涌动剧本官方上限（13-15 人需旅行者，不实现）
 	RoomCodeLength:     6,
-	AIChateIntervalSec: envInt("BOTC_AI_CHAT_INTERVAL", 12),
+	AIChateIntervalSec: envInt("BOTC_AI_CHAT_INTERVAL", 8),
 	// 真人夜晚交互选择开关：默认开启（真人拿到占卜师/管家等主动角色时挂起等待手动选择）
 	// 关闭后：夜晚全自动推进，真人角色也自动执行（演示兜底）
 	HumanChoiceEnabled: envBool("BOTC_HUMAN_CHOICE", true),

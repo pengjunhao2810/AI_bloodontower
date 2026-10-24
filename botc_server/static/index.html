@@ -657,6 +657,11 @@
             <el-input-number v-model="seatCount" :min="5" :max="12" size="small" style="flex:1;"></el-input-number>
             <button class="btn btn-sm" @click="setSeats">设定</button>
         </div>
+        <div v-if="isHost && !watchMode" style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+            <span class="label-mono" style="flex-shrink:0;">🎭 剧本演绎模式</span>
+            <el-switch v-model="dramaMode" @change="setDrama" />
+            <span style="font-size:12px;color:var(--dim);flex:1;">开启后：AI 导演扮演全场 NPC，为你演出最烧脑的剧情（真人对 AI 私聊由导演自由演绎）</span>
+        </div>
         <div class="label-mono" style="margin-bottom:8px;">① 选择大模型服务</div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">
             <button v-for="pr in llmPresets" :key="pr.key" class="btn btn-sm"
@@ -681,21 +686,18 @@
         <button class="btn btn-primary btn-block" @click="confirmAddLlmAI" :disabled="llmBusy">
             {{ llmBusy ? '添加中…' : '＋ 添加一个 AI 玩家（可连续添加多个）' }}
         </button>
-        <div style="display:flex;gap:8px;margin-top:8px;">
-            <button class="btn" style="flex:1;" @click="fillAndStart" title="点一下添加 1 个本地假人">🧑‍🤝‍🧑 ＋ 添加假人</button>
-        </div>
         <div class="hint" style="margin-top:6px;">
-            {{ llmForm.provider === 'ollama' ? 'Ollama 本地模型：本机安装 Ollama 并运行 ollama run qwen2.5:7b 后即可免费离线使用' : '一个 Key 可添加多个 AI 座位（不同座位可以用不同模型，形成"多源混战"）；假人是不花 Token 的本地 AI，适合快速凑人数' }}
+            {{ llmForm.provider === 'ollama' ? 'Ollama 本地模型：本机安装 Ollama 并运行 ollama run qwen2.5:7b 后即可免费离线使用' : '一个 Key 可添加多个 AI 座位（不同座位可以用不同模型，形成"多源混战"）' }}
         </div>
         <div style="margin-top:16px;border-top:1px solid #3a3f4b;padding-top:12px;">
-            <div class="label-mono" style="margin-bottom:8px;">③ 本房间 AI 玩家（大模型 / 假人，均可踢出）</div>
+            <div class="label-mono" style="margin-bottom:8px;">③ 本房间 AI 玩家（均可踢出）</div>
             <div v-if="roomAIList.length" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px;">
                 <div v-for="ai in roomAIList" :key="ai.seat_number"
                      style="display:flex;justify-content:space-between;align-items:center;background:#1d212c;border:1px solid #2a2f3c;border-radius:6px;padding:7px 12px;">
                     <span style="font-size:13px;">
                         <b style="color:#a5aef0;">座位 {{ ai.seat_number }}</b>
                         <span style="color:#e8b23c;margin-left:8px;">{{ ai.ai_model || 'AI 玩家' }}</span>
-                        <span v-if="ai.ai_type === 'local'" class="tag tag-dim" style="margin-left:8px;">本地假人</span>
+                        <span v-if="ai.ai_type === 'local'" class="tag tag-dim" style="margin-left:8px;">本地 AI</span>
                         <span v-else class="tag" style="margin-left:8px;">大模型</span>
                     </span>
                     <button class="btn btn-danger btn-sm" @click="removeAI(ai.seat_number)">踢出</button>

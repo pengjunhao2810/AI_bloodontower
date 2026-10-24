@@ -367,6 +367,7 @@
             const activePrivateTarget = ref(null); // 私聊模式：非空时聊天面板整体切换为与该玩家的私聊对话
             // 电子斗蛐蛐：上帝视角状态
             const watchMode = ref(false);
+            const dramaMode = ref(false); // 剧本演绎模式（房间设置开关，房主可切）
             const watchPrivateMsgs = ref([]);
             const watchStories = ref({});
             const arenaRecord = ref(null);
@@ -698,7 +699,8 @@
                 applyRoomState(ack.state);
                 if (ack.watch_mode) {
                     watchMode.value = true;
-                    watchPrivateMsgs.value = ack.private_msgs || [];
+                    // 历史私聊字段名兼容：归档 JSON 用 from/to，实时事件用 from_number/to_number
+                    watchPrivateMsgs.value = (ack.private_msgs || []).map(normPM);
                     watchStories.value = ack.stories || [];
                 } else {
                     watchMode.value = false;
@@ -707,11 +709,25 @@
                 }
                 return ack;
             }
+            // 私聊消息字段规范化：统一为 from_number/to_number（缺失时从 from/to 兼容读取）
+            function normPM(m) {
+                if (m.from_number == null && m.from != null) m.from_number = m.from;
+                if (m.to_number == null && m.to != null) m.to_number = m.to;
+                return m;
+            }
             function applyRoomState(snap) {
                 if (!snap) return;
                 room.value = snap.room;
                 roomMessages.value = snap.messages || [];
                 seatCount.value = snap.room.max_players;
+                dramaMode.value = !!snap.room.drama;
+            }
+            // 房主切换剧本演绎模式
+            async function setDrama(on) {
+                try {
+                    await WS.send('room.set_drama', { room_code: roomCode.value, on });
+                    toast(on ? '已开启剧本演绎模式' : '已关闭剧本演绎模式', 'success');
+                } catch (e) { toast(e.message, 'error'); dramaMode.value = !on; }
             }
             async function sendRoomMsg() {
                 const txt = chatText.value.trim();
@@ -729,20 +745,6 @@
             async function addAI(type) {
                 try {
                     await WS.send('room.add_ai', { room_code: roomCode.value, ai_type: type });
-                } catch (e) { toast(e.message, 'error'); }
-            }
-            // 一键假人凑人数：填充到设定人数（至少 5 人）直接开局
-            async function fillBots() {
-                try {
-                    const ack = await WS.send('room.fill_bots', { room_code: roomCode.value });
-                    toast('已添加 ' + (ack.added || 0) + ' 个假人，可以直接开始对局', 'success');
-                } catch (e) { toast(e.message, 'error'); }
-            }
-            // 仅凑人：每点一下添加 1 个本地假人（不开局）
-            async function fillAndStart() {
-                try {
-                    await WS.send('room.add_ai', { room_code: roomCode.value, ai_type: 'local' });
-                    toast('已添加 1 个假人', 'success');
                 } catch (e) { toast(e.message, 'error'); }
             }
             // 大模型 AI 弹窗：手动输入 API 配置（服务商预设 + 自定义）
@@ -1524,7 +1526,7 @@
             });
             // 斗蛐蛐上帝视角：AI 私聊全量推送
             WS.on('game.watch_private', (d) => {
-                watchPrivateMsgs.value.push(d);
+                watchPrivateMsgs.value.push(normPM(d));
                 if (watchPrivateMsgs.value.length > 300) watchPrivateMsgs.value = watchPrivateMsgs.value.slice(-300);
             });
             // 斗蛐蛐上帝视角：说书人/技能全量推送
@@ -1851,12 +1853,12 @@
                 forumPosts, forumDetail, forumNewDialog, forumNewForm, forumReplyText,
                 openForum, loadForum, openForumPost, backForum, createForumPost, sendForumReply, toggleForumLike,
                 watchMode, watchPrivateMsgs, watchStories, arenaRecord, arenaRecordDialog, fetchArenaRecord, closeArenaRecord, exportArenaRecord,
+                dramaMode, setDrama,
                 watchSessions, watchActiveSession, watchActiveMsgs, openWatchSession, watchNameOf,
                 slayerDialog, slayerTarget, mySlayerUsable, openSlayerDialog, confirmSlayerShoot,
                 layoutMode, toggleLayout, circlePlayers, roomCirclePlayers, measureCircleArea,
                 recording, startVoice,
-                sendRoomMsg, toggleReady, addAI, removeAI, kickPlayer, fillBots, setSeats, startGame, leaveRoom,
-                fillAndStart,
+                sendRoomMsg, toggleReady, addAI, removeAI, kickPlayer, setSeats, startGame, leaveRoom,
                 llmDialog, llmPresets, llmForm, llmModelOptions, openLlmDialog, pickLlmPreset, confirmAddLlmAI, usage, roomUsage, fetchUsage, fmtTokens, llmBusy, pingLlm, pingResult, roomAIList, humanList,
                 aiCount: (r) => r.players.filter(p => p.is_ai).length,
                 sendGameMsg, nextPhase, nominate, endGame, backToRoom, atMenuVisible, onChatInput, insertAt,

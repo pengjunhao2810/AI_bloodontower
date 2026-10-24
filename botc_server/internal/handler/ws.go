@@ -152,6 +152,8 @@ func (h *Handler) onWSMessage(c *ws.Client, event string, data map[string]any, r
 		evType = "remove_ai"
 	case "room.set_seats":
 		evType = "set_seats"
+	case "room.set_drama":
+		evType = "set_drama"
 	case "room.start":
 		evType = "start"
 	case "room.leave":
@@ -188,8 +190,6 @@ func (h *Handler) onWSMessage(c *ws.Client, event string, data map[string]any, r
 		evType = "tip_ack"
 	case "room.kick":
 		evType = "kick"
-	case "room.fill_bots":
-		evType = "fill_bots"
 	default:
 		reply(false, "未知指令", nil)
 		return

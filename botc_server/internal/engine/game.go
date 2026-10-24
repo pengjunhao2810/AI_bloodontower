@@ -108,6 +108,7 @@ type GameData struct {
 	// 均衡配板：斗蛐蛐观战模式预设角色组合（5 组专业配板轮转），为空则随机发牌
 	ForceRoles []string `json:"-"`
 
+
 	// 占卜师的红鲱鱼：一名非恶魔玩家始终被占卜师当作恶魔
 	RedHerringPID string `json:"red_herring_pid"`
 
@@ -404,7 +405,7 @@ func (e *Engine) StepNight() map[string]any {
 	msgs := []map[string]any{}
 
 	for pid, p := range e.GD.Players {
-		// 死亡玩家跳过；但守鸦人例外——夜晚死亡后仍会被唤醒主动查验
+		// 死亡玩家跳过；但守鸦人例外——死亡当晚（NightDeaths 已标记）或死亡后仍会被唤醒主动查验
 		if !p.Alive && p.Role != "ravenkeeper" {
 			continue
 		}
@@ -497,7 +498,10 @@ func (e *Engine) GenStorytellerMsg(pid, roleKey string, action map[string]any) s
 		}
 	case "empath":
 		if n, ok := action["evil"].(int); ok {
-			return "💗 你相邻的存活玩家中有 " + itoa(n) + " 人是邪恶的"
+			// 带具体邻居编号：弱模型自己算邻居经常算错，导致共情者乱报"#1和#5有邪恶"
+			p := e.GD.Players[pid]
+			l, r := e.Neighbors(p.Number)
+			return "💗 你相邻的存活玩家（#"+itoa(l)+" 与 #"+itoa(r)+"）中有 " + itoa(n) + " 人是邪恶的"
 		}
 	case "undertaker":
 		if info, ok := action["info"].(string); ok {
@@ -629,9 +633,10 @@ func (e *Engine) DoAction(pid, roleKey string, isFirst bool) map[string]any {
 		}
 		return map[string]any{}
 	case "ravenkeeper":
-		// 守鸦人死亡后唤醒查验；中毒时仍会被唤醒，但得到错误角色名
+		// 守鸦人死当晚（NightDeaths 已标记，Alive 尚未更新）或死亡后被唤醒查验；
+		// 中毒时仍会被唤醒，但得到错误角色名
 		// AI 守鸦人：用 LLM 决策选择查验目标（基于生前怀疑），失败兜底随机
-		if !p.Alive && !p.RavenkeeperUsed && len(alive) > 0 {
+		if (!p.Alive || e.GD.NightDeaths[p.Number]) && !p.RavenkeeperUsed && len(alive) > 0 {
 			t := e.pickTargetByAI(pid, "ravenkeeper", true)
 			if t == "" {
 				t = e.pickTarget(pid, true)
@@ -707,14 +712,73 @@ func (e *Engine) fakeClue(roleKey string) string {
 	}
 	switch roleKey {
 	case "chef":
-		return "👨‍🍳 你得知有 " + itoa(rand.Intn(3)) + " 对相邻的玩家是邪恶阵营"
+		// 假对数 = 真实对数以外的随机值（中毒信息必然错误且格式正确）
+		realPairs := 0
+		allNums := []int{}
+		for _, q := range e.GD.Players {
+			allNums = append(allNums, q.Number)
+		}
+		sort.Ints(allNums)
+		for i := range allNums {
+			a := e.PlayerByNum(allNums[i])
+			b := e.PlayerByNum(allNums[(i+1)%len(allNums)])
+			if a != nil && b != nil && a.FlagEvil && b.FlagEvil {
+				realPairs++
+			}
+		}
+		return "👨‍🍳 你得知有 " + itoa(fakeCount(realPairs, 3)) + " 对相邻的玩家是邪恶阵营"
 	case "washerwoman":
-		towns := GetRolesByTeam(TeamTownsfolk)
-		return "🧺 你得知 " + joinNums(pair) + " 中有一人是【" + Roles[towns[rand.Intn(len(towns))]].Name + "】"
+		// 假线索排除自身角色，优先给不在场镇民（"#A与#B中有一人是洗衣妇"这种
+		// 自相矛盾的信息会让人一眼看穿洗衣妇中毒）
+		onBoard := map[string]bool{}
+		for _, q := range e.GD.Players {
+			onBoard[q.Role] = true
+		}
+		pool := []string{}
+		for _, rk := range GetRolesByTeam(TeamTownsfolk) {
+			if rk == "washerwoman" || onBoard[rk] {
+				continue
+			}
+			pool = append(pool, rk)
+		}
+		if len(pool) == 0 {
+			for _, rk := range GetRolesByTeam(TeamTownsfolk) {
+				if rk != "washerwoman" {
+					pool = append(pool, rk)
+				}
+			}
+		}
+		return "🧺 你得知 " + joinNums(pair) + " 中有一人是【" + Roles[pool[rand.Intn(len(pool))]].Name + "】"
 	case "librarian":
+		// 与真实情况相反：场上有外来者就说"没有"，没有就说"有"（必然错误且合理）
+		hasOutsider := false
+		for _, q := range e.GD.Players {
+			if q.Team == TeamOutsider {
+				hasOutsider = true
+				break
+			}
+		}
+		if hasOutsider {
+			return "📚 本局没有外来者"
+		}
 		return "📚 你得知 " + joinNums(pair) + " 中有一人是外来者"
 	case "investigator":
-		return "🔍 你得知 " + joinNums(pair) + " 中有一人是爪牙"
+		// 优先给不在场爪牙（指向不在场爪牙必然错误且合理）
+		minions := GetRolesByTeam(TeamMinion)
+		onBoard := map[string]bool{}
+		for _, q := range e.GD.Players {
+			onBoard[q.Role] = true
+		}
+		pool := []string{}
+		for _, rk := range minions {
+			if !onBoard[rk] {
+				pool = append(pool, rk)
+			}
+		}
+		if len(pool) == 0 {
+			pool = minions
+		}
+		return "🔍 你得知 " + joinNums(pair) + " 中有一人是【" + Roles[pool[rand.Intn(len(pool))]].Name + "】"
 	case "spy":
 		lines := []string{}
 		allNums := []int{}
@@ -731,8 +795,23 @@ func (e *Engine) fakeClue(roleKey string) string {
 	return ""
 }
 
-// fakeRoleName 随机返回一个与真实名不同的角色名（虚假信息用）
+// fakeRoleName 中毒信息位返回虚假角色名：优先给不在场角色（指向不在场角色必然错误且合理，
+// 避免"被处决的#X是恶魔"这种与场上局势自相矛盾的离谱信息）
 func (e *Engine) fakeRoleName(realName string) string {
+	onBoard := map[string]bool{}
+	for _, q := range e.GD.Players {
+		onBoard[q.Role] = true
+	}
+	off := []string{}
+	for _, r := range Roles {
+		if r.Key == "drunk" || r.Name == realName || onBoard[r.Key] {
+			continue
+		}
+		off = append(off, r.Name)
+	}
+	if len(off) > 0 {
+		return off[rand.Intn(len(off))]
+	}
 	keys := []string{}
 	for k := range Roles {
 		if k == "drunk" || Roles[k].Name == realName {
@@ -1889,9 +1968,24 @@ func (e *Engine) fakeDrunkClue(drunk *PlayerState) string {
 	pair := otherNums[:minInt(2, len(otherNums))]
 	switch drunk.FakeRole {
 	case "chef":
-		return "👨‍🍳 你得知有 " + itoa(rand.Intn(3)) + " 对相邻的玩家是邪恶阵营"
+		// 假对数 = 真实对数以外的随机值
+		realPairs := 0
+		allNums := []int{}
+		for _, q := range e.GD.Players {
+			allNums = append(allNums, q.Number)
+		}
+		sort.Ints(allNums)
+		for i := range allNums {
+			a := e.PlayerByNum(allNums[i])
+			b := e.PlayerByNum(allNums[(i+1)%len(allNums)])
+			if a != nil && b != nil && a.FlagEvil && b.FlagEvil {
+				realPairs++
+			}
+		}
+		return "👨‍🍳 你得知有 " + itoa(fakeCount(realPairs, 3)) + " 对相邻的玩家是邪恶阵营"
 	case "empath":
-		return "💗 你相邻的存活玩家中有 " + itoa(rand.Intn(3)) + " 人是邪恶的"
+		l, r := e.Neighbors(drunk.Number)
+		return "💗 你相邻的存活玩家（#" + itoa(l) + " 与 #" + itoa(r) + "）中有 " + itoa(rand.Intn(3)) + " 人是邪恶的"
 	case "fortune_teller":
 		verdict := "没有恶魔"
 		if rand.Float64() < 0.5 {
@@ -1899,13 +1993,57 @@ func (e *Engine) fakeDrunkClue(drunk *PlayerState) string {
 		}
 		return "🔮 你占卜的 " + joinNums(pair) + " 中" + verdict
 	case "washerwoman":
-		names := GetRolesByTeam(TeamTownsfolk)
-		rn := Roles[names[rand.Intn(len(names))]].Name
+		// 酒鬼假线索同样排除自身伪装角色，优先给不在场镇民
+		onBoard := map[string]bool{}
+		for _, q := range e.GD.Players {
+			onBoard[q.Role] = true
+		}
+		pool := []string{}
+		for _, rk := range GetRolesByTeam(TeamTownsfolk) {
+			if rk == drunk.FakeRole || onBoard[rk] {
+				continue
+			}
+			pool = append(pool, rk)
+		}
+		if len(pool) == 0 {
+			for _, rk := range GetRolesByTeam(TeamTownsfolk) {
+				if rk != drunk.FakeRole {
+					pool = append(pool, rk)
+				}
+			}
+		}
+		rn := Roles[pool[rand.Intn(len(pool))]].Name
 		return "🧺 你得知 " + joinNums(pair) + " 中有一人是【" + rn + "】"
 	case "librarian":
+		// 与真实情况相反：场上有外来者就说"没有"，没有就说"有"
+		hasOutsider := false
+		for _, q := range e.GD.Players {
+			if q.Team == TeamOutsider {
+				hasOutsider = true
+				break
+			}
+		}
+		if hasOutsider {
+			return "📚 本局没有外来者"
+		}
 		return "📚 你得知 " + joinNums(pair) + " 中有一人是外来者"
 	case "investigator":
-		return "🔍 你得知 " + joinNums(pair) + " 中有一人是爪牙"
+		// 优先给不在场爪牙（指向不在场爪牙必然错误且合理）
+		minions := GetRolesByTeam(TeamMinion)
+		onBoard := map[string]bool{}
+		for _, q := range e.GD.Players {
+			onBoard[q.Role] = true
+		}
+		pool := []string{}
+		for _, rk := range minions {
+			if !onBoard[rk] {
+				pool = append(pool, rk)
+			}
+		}
+		if len(pool) == 0 {
+			pool = minions
+		}
+		return "🔍 你得知 " + joinNums(pair) + " 中有一人是【" + Roles[pool[rand.Intn(len(pool))]].Name + "】"
 	}
 	return ""
 }
@@ -2032,7 +2170,7 @@ func (e *Engine) assignInfoClues(players map[string]*PlayerState, townsfolk, out
 		}
 		if minPID != "" && otherPID != "" {
 			p.InfoClues = append(p.InfoClues,
-				"🔍 你得知 #"+itoa(players[minPID].Number)+" 与 #"+itoa(players[otherPID].Number)+" 中有一人是爪牙")
+				"🔍 你得知 #"+itoa(players[minPID].Number)+" 与 #"+itoa(players[otherPID].Number)+" 中有一人是【"+players[minPID].RoleName+"】")
 		}
 	}
 

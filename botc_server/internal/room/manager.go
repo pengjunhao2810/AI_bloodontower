@@ -60,8 +60,10 @@ func (m *Manager) Get(code string) *Room {
 }
 
 // Create 创建房间：内存 + DB + 启动 goroutine
-func (m *Manager) Create(code string, hostID uint, hostName string) *Room {
-	rec := model.Room{RoomCode: code, HostID: hostID, Status: "waiting", MaxPlayers: 8}
+// drama=true 为剧本演绎模式：1 真人 + AI 导演扮演全场 NPC
+func (m *Manager) Create(code string, hostID uint, hostName string, drama ...bool) *Room {
+	isDrama := len(drama) > 0 && drama[0]
+	rec := model.Room{RoomCode: code, HostID: hostID, Status: "waiting", MaxPlayers: 8, Drama: isDrama}
 	m.DB.Create(&rec)
 	m.DB.Create(&model.RoomSeat{RoomID: rec.ID, UserID: &hostID, SeatNumber: 0})
 
@@ -78,6 +80,7 @@ func (m *Manager) Create(code string, hostID uint, hostName string) *Room {
 		mgr:     m,
 		msgSeq:  0,
 		stories: make(map[int][]string),
+		Drama:   isDrama,
 	}
 	m.mu.Lock()
 	m.rooms[code] = r
@@ -89,7 +92,7 @@ func (m *Manager) Create(code string, hostID uint, hostName string) *Room {
 
 // CreateWatch 创建电子斗蛐蛐观战房间：房主不占座位，纯 AI 对局，房主上帝视角观战
 func (m *Manager) CreateWatch(code string, hostID uint, hostName string) *Room {
-	rec := model.Room{RoomCode: code, HostID: hostID, Status: "waiting", MaxPlayers: 12}
+	rec := model.Room{RoomCode: code, HostID: hostID, Status: "waiting", MaxPlayers: 12, WatchMode: true}
 	m.DB.Create(&rec)
 
 	r := &Room{
@@ -123,6 +126,8 @@ func (m *Manager) Delete(code string) {
 	m.mu.Unlock()
 	if ok {
 		close(r.quit)
+		// 清除剧本演绎房间标记（随房间销毁）
+		m.AI.SetRoomDrama(r.Code, false)
 		// 解散房间：清空该房间 AI 笔记（对局生命周期信号，异步不阻塞销毁）
 		go func() {
 			defer func() { _ = recover() }()
@@ -240,6 +245,8 @@ func restoreFromDB(m *Manager, rec *model.Room) *Room {
 		quit:       make(chan struct{}),
 		mgr:        m,
 		stories:    make(map[int][]string),
+		WatchMode:  rec.WatchMode,
+		Drama:      rec.Drama,
 	}
 	for _, s := range rec.Seats {
 		name := ""

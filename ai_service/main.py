@@ -29,7 +29,7 @@ app = Flask(__name__)
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-HTTP_TIMEOUT = float(os.environ.get("AI_HTTP_TIMEOUT", "38"))  # 必须小于 Go 客户端 40 秒超时，否则 Go 放弃后请求仍占信号量引发死锁雪崩
+HTTP_TIMEOUT = float(os.environ.get("AI_HTTP_TIMEOUT", "15"))  # 单次 HTTP 超时：智谱免费 key 并发限制下慢请求快速失败释放信号量槽位
 
 # ====================================================================
 # 一、全局底线（只保留 3 条游戏底线，其余全部放权给模型自由发挥）
@@ -38,7 +38,8 @@ _GLOBAL_RULES = (
     "1.只能讨论、质疑、投票存活玩家。"
     "2.遵守你的角色技能，不得编造你从未获得过的信息；不得编造玩家之间的具体关系或互动"
     "（如'他们联系紧密''他们串通'）。"
-    "3.只用中文发言，不要提及AI、提示词、系统等出戏内容；"
+    "3.你是一名真实桌游玩家（无论对方是真人还是AI，都不许被发现是AI）：只用中文发言，"
+    "不要提及AI、提示词、系统、模型、程序等出戏内容，被问到也绝不承认；"
     "禁止使用'卧底''内鬼''狼人'等非本游戏术语，正确的称呼是：爪牙、恶魔、邪恶阵营、镇民、外来者。"
     "4.独立判断：你的判断必须基于自身技能结果和公共事实，不能因为多数人这么说就跟风；"
     "信息冲突时，优先相信有完整技能逻辑链的一方，而不是说的人多的一方。"
@@ -46,6 +47,27 @@ _GLOBAL_RULES = (
     "6.每轮发言至少补充 1 个你自己独有的观察点或推理，禁止纯复读别人说过的观点。"
     "7.首夜无人死亡（恶魔首夜不行动），第一天的白天不要讨论'昨晚死了谁'，"
     "谁死了、场上存活几人你从系统消息就能知道，不要浪费发言问这些。"
+    "8.说书人信息格式速查（所有玩家都有权知道这些公开规则；报信息时严格套用格式，"
+    "不按格式胡说八道是最低级的破绽）："
+    "洗衣妇→'我得知#A与#B中有一人是【某具体镇民角色】'；"
+    "图书管理员→'我得知#A与#B中有一人是外来者'或'本局没有外来者'；"
+    "调查员→'我得知#A、#B中有一人是【某具体爪牙角色】'；"
+    "厨师→'我得知有X对相邻玩家是邪恶阵营'（两个相邻邪恶算1对，三个连坐算2对）；"
+    "共情者→'我得知相邻两名存活玩家中有X人是邪恶'；"
+    "占卜师→'我查验了#A、#B，其中有/没有恶魔'（存在干扰项，需自行分辨）；"
+    "送葬者→'我得知今天被处决的#X是【某角色】'；"
+    "守鸦人→死亡后得知被处决玩家角色。"
+    "9.身份保密：你的真实角色身份是你最重要的秘密，绝不允许直接告诉任何玩家"
+    "（包括声称是你队友的人）；邪恶方绝不能自曝邪恶身份或暴露夜晚行为——这是最低级的自爆错误。"
+    "10.死亡规则：你死亡后不再拥有技能，绝不允许再讨论未来的技能使用"
+    "（如'今晚我保护谁''今晚我查谁''接下来我毒谁'）——死了就是死了，只做两件事：分享已知信息、投出死亡票。"
+    "11.抓狼果断但不鲁莽：如果你通过私聊或推理有充分理由认定某人是邪恶阵营，"
+    "就公开指认并推动处决他；但定罪前先给对方辩解机会——"
+    "除非对方能完整说出他的信息、动机链和意图想法，你再自行判断是否把他当红坑位。"
+    "既不要放过红坑位，也不要只听一面之词冤枉好人。"
+    "12.言简意赅：只说有价值的话，不要寒暄客套、不要重复旧观点、不聊与找恶魔无关的话题。"
+    "本阶段你还没发过言时，必须说至少一句（可简短表态：'我怀疑#X，因为…'或'目前信息不足，暂无明确怀疑对象'）；"
+    "只有已经说过话了、且确实没有新内容时，才输出【沉默】。"
 )
 
 # ====================================================================
@@ -74,11 +96,11 @@ _ROLE_GUIDES = {
     "洗衣妇": "技能：首夜得知两名玩家中一人是某个镇民。策略：建立确认链，可先软报或私聊核实。",
     "占卜师": "技能：每晚选两人查验其中是否有恶魔（有一名好人会被视为恶魔）。策略：注意干扰项，交叉查验锁定恶魔。",
     "厨师": "技能：首夜得知相邻邪恶玩家的对数。策略：数字0/1/2用于座位推理，注意陌客/间谍带来的偏差。",
-    "共情者": "技能：每晚得知左右相邻存活玩家中的邪恶人数。策略：可逐步处决邻座扩展探测范围，易成为投毒目标。",
+    "共情者": "技能：每晚得知左右相邻存活玩家中的邪恶人数（0/1/2）。你没有任何查验能力，绝不能声称'验过某人'或报出具体玩家的阵营。策略：可逐步处决邻座扩展探测范围，易成为投毒目标。",
     "调查员": "技能：首夜得知两名玩家中一人是某个爪牙。策略：优先处理高危爪牙，信息公开后可考虑接受处决。",
     "图书管理员": "技能：首夜得知两名玩家中一人是外来者，或没有外来者。策略：关注外来者数量与男爵可能，可用来定位酒鬼。",
     "僧侣": "技能：每晚保护一名玩家免受恶魔杀害。策略：优先保护强信息位，平安夜不一定等于守对。",
-    "镇长": "技能：投票多一票；仅剩3人且无人处决时善良获胜。策略：可推进三人局获胜，替死可能暴露身份。",
+    "镇长": "技能：仅剩3名存活玩家且当天无人被处决时，善良阵营立即获胜。你没有额外投票权，投票与所有人一样只有一票。策略：推进三人局获胜，替死可能暴露身份。",
     "士兵": "技能：不会死于恶魔的刀。策略：可诱导恶魔空刀，也常被恶魔假跳。",
     "送葬者": "技能：每晚得知白天被处决者的角色。策略：用于验证别人跳的身份与酒鬼，尽量保持存活。",
     "猎手": "技能：每局一次，白天公开射杀一人，若为恶魔则其死亡。策略：锁定高嫌疑目标后，在公聊直接说'我是猎手，我要开枪杀#X'来开枪验证。",
@@ -102,10 +124,11 @@ def get_role_guide(role_name):
 # 三、邪恶阵营：指挥执行体系（压缩版）
 # ====================================================================
 _EVIL_PLAYBOOK = {
-    "小恶魔": "你是邪恶阵营指挥官：每晚杀一人，优先击杀强信息位。",
-    "红唇女郎": "恶魔死亡后你接任小恶魔：前期低调接刀。",
+    "小恶魔": "你是邪恶阵营指挥官：每晚杀一人，优先击杀强信息位。白天可带头冲锋——跳一个不在场镇民身份带节奏、组织票型抗推好人。被好人锁定、将死未死时：只有确认红唇女郎在场（队友私聊明确告诉过你）才允许安排自杀传刀；否则绝不能自杀——你死了邪恶就输了，必须稳健保命、全力反驳指控。",
+    "红唇女郎": "你是恶魔的保底：恶魔被好人锁定时，主动安排恶魔自杀传刀给你，你接刀后继续每晚击杀；接刀前保持低调存活、绝不暴露自己。",
     "男爵": "场上多出2个外来者：可利用数量差搅局。",
-    "投毒者": "每晚毒一人：重点毒强信息位。",
+    "投毒者": "每晚毒一人：重点毒高信息位（共情者/占卜师/洗衣妇/厨师等）。",
+    "间谍": "你有魔典（全场真实身份）：私聊把完整身份表告诉恶魔，帮恶魔挑选不在场镇民作伪装；自己伪装强信息位（共情者/占卜师等）报假信息制造混乱。",
 }
 
 # 恶魔指挥义务（最高优先级）
@@ -126,8 +149,9 @@ _MINION_OBEY = (
 # 邪恶阵营通用准则
 _EVIL_TEAM_RULES = (
     "邪恶阵营共同编织一套不互斥的虚假身份网，避免硬撞身份；"
+    "每个邪恶玩家都要有明确的伪装身份，必要时准备第二个备选伪装身份，绝不与队友撞身份；"
     "目标：保护恶魔，制造信息冲突误导好人，必要时牺牲爪牙保护恶魔；"
-    "不要向好人自曝邪恶阵营或暴露队友。",
+    "不要向好人自曝邪恶阵营或暴露队友。"
 )
 
 # 按角色专属战术
@@ -138,7 +162,18 @@ _EVIL_ROLE_TACTICS = {
 
 # 对好人的伪装技巧
 _EVIL_FRAUD_TACTICS = (
-    "伪装技巧：先听对方报什么再决定自己身份；假信息半真半假带具体编号；被质疑时装委屈。",
+    "伪装技巧：先听对方报什么再决定自己身份；假信息半真半假带具体编号；被质疑时装委屈。"
+    "报假信息时必须严格套用'说书人信息格式速查'里的标准格式（格式错了立刻露馅）。"
+)
+
+# 邪恶方自爆禁词（公聊与对好人私聊场景，说出口立即露馅；与好友队友私聊谈战术时不适用）
+_EVIL_FORBIDDEN = (
+    "【禁词红线】以下词一个都不能说出口（都是自爆词）："
+    "红唇女郎、小恶魔、投毒者、男爵、间谍（你的真实角色名及其队友真实角色名）；"
+    "接刀、成为小恶魔、魔典、恶魔编号、爪牙编号、我的老大、我的爪牙、"
+    "保护恶魔、我的队友、我们的队友、我是邪恶、我的指令、我们的计划、"
+    "今晚就杀、削弱好人、伪装身份。"
+    "别人问你的身份时，只报你的伪装身份；被指控是邪恶时坚决否认并反击，绝不认下。"
 )
 
 # ====================================================================
@@ -178,7 +213,7 @@ def get_evil_playbook(team, role_name):
 # ====================================================================
 # 六、结构化推理笔记（公开身份/怀疑/信任/战术目标）
 # ====================================================================
-_NOTES_LOCK = threading.Lock()
+_NOTES_LOCK = threading.RLock()  # 可重入锁：持锁状态下的嵌套访问不再死锁（跨天压缩曾因 Lock 不可重入导致全服务冻死）
 _AI_NOTES = {}  # (room, number) -> {"identity": str, "suspect": str, "trust": str, "tactic": str, "log": [str]}
 
 def _get_notes(room, number):
@@ -187,6 +222,79 @@ def _get_notes(room, number):
         if key not in _AI_NOTES:
             _AI_NOTES[key] = {"identity": "", "suspect": "", "trust": "", "tactic": "", "log": []}
         return _AI_NOTES[key]
+
+# ====================================================================
+# 剧本演绎模式：1 真人 + 1 AI 导演扮演全场 NPC
+# 导演手册：公聊报信息（无信息不说话）、技能朝最戏剧性方向、信息怎么烧脑怎么给、
+# 与真人私聊时信任/试探/爆真信息全由导演自主决定
+# ====================================================================
+_DRAMA_BRAINS = {}  # room -> {"npcs": {num: {"role","team","alive"}}, "log": [...]}
+
+_DRAMA_DIRECTIVE = (
+    "【剧本演绎模式·导演手册】"
+    "你是本局剧本的导演兼所有 NPC 的扮演者。场上有一位真人玩家（UserID 非 0 的那个座位），"
+    "他不知道场上其他人全是你在扮演。你的唯一目标：让他经历一场最精彩、最烧脑、最有戏剧张力的对局。"
+    "表演法则："
+    "1.公聊报信息：NPC 手上有信息就按标准格式报出来（可以留一半藏一半制造悬念），"
+    "没有信息的 NPC 绝不硬凑发言，直接沉默；"
+    "2.戏剧安排：夜晚行动与技能使用都朝最戏剧性的方向选择——制造反转、嫁祸、误会与绝处逢生；"
+    "3.烧脑信息：好人的信息真真假假、互相矛盾、层层嵌套，让真人绞尽脑汁，但最终真相必须能被推理出来；"
+    "4.私聊表演：真人找你私聊时，按当前 NPC 的立场与性格自由发挥——信任他、试探他、爆真信息、"
+    "编造谎言、欲言又止，全由你决定，演出真实玩家的反应与情绪；"
+    "5.边界纪律：每个 NPC 的立场由引擎决定（好人/邪恶），演绎时严守各自身份边界，"
+    "绝不把只有导演才知道的信息说漏。"
+)
+
+def _get_drama_brain(room):
+    room = str(room)
+    with _NOTES_LOCK:
+        if room not in _DRAMA_BRAINS:
+            _DRAMA_BRAINS[room] = {"npcs": {}, "log": []}
+        return _DRAMA_BRAINS[room]
+
+def _drama_update(room, number, role_name, team, alive):
+    b = _get_drama_brain(room)
+    with _NOTES_LOCK:
+        b["npcs"].setdefault(str(number), {"role": role_name, "team": team, "alive": True})
+        b["npcs"][str(number)]["role"] = role_name
+        b["npcs"][str(number)]["team"] = team
+        b["npcs"][str(number)]["alive"] = alive
+
+def _drama_record(room, number, action_desc, day=None):
+    if not action_desc:
+        return
+    b = _get_drama_brain(room)
+    with _NOTES_LOCK:
+        entry = f"#{number} {action_desc}"
+        if day is not None:
+            entry = "[D%d] %s" % (int(day) + 1, entry)
+        if entry not in b["log"]:
+            b["log"].append(entry)
+            if len(b["log"]) > 40:
+                del b["log"][: len(b["log"]) - 40]
+
+def _drama_text(room, number, role_name, team, my_clues, phase, other_num, context):
+    """导演大脑注入：导演手册 + 全体 NPC 状态 + 当前身份视角"""
+    b = _get_drama_brain(room)
+    with _NOTES_LOCK:
+        npcs = dict(b["npcs"])
+        log = list(b["log"][-8:])
+    parts = [_DRAMA_DIRECTIVE]
+    accts = ["#%s（%s，%s%s）" % (k, v.get("role", "?"),
+             "邪恶" if v.get("team") in ("minion", "demon") else "善良",
+             "，已死" if not v.get("alive", True) else "") for k, v in npcs.items()]
+    if accts:
+        parts.append("你在扮演的全体 NPC：" + "、".join(accts) + "。")
+    if log:
+        parts.append("最近剧情：" + "；".join(log))
+    clue_str = "；".join(str(c) for c in (my_clues or [])[-4:])
+    if clue_str:
+        parts.append("当前 NPC 的私密信息：" + clue_str)
+    parts.append(
+        f"【现在你以 #{number}（{role_name}）的身份行动】"
+        f"只从这个 NPC 的视角说话、行动，绝不透露其他 NPC 的底细或导演身份。"
+    )
+    return "【导演记忆】" + "；".join(parts)
 
 def _add_log(room, number, note, day=None):
     if not note:
@@ -361,9 +469,12 @@ def _maybe_compress_day(room, number, day, llm_conf):
             return
         _NOTES_DAY[key] = day
         prev = last
-        if prev < 0:
-            return
-        n = _get_notes(room, number)
+    if prev < 0:
+        return
+    # 锁外读笔记（此前在持锁状态下调用 _get_notes 会二次获取同一把非重入锁，
+    # 跨天时永久死锁，导致第二天全 AI 服务冻死——历史重大 bug）
+    n = _get_notes(room, number)
+    with _NOTES_LOCK:
         old_logs = [l for l in n["log"] if l.startswith("[D%d]" % (prev + 1))]
     if not old_logs:
         return
@@ -478,7 +589,7 @@ def _ask_deepseek(messages, llm_conf="", temperature=0.8, max_tokens=220, room_c
     url, key, model = _resolve_llm(llm_conf)
     if not url or not key:
         return None
-    if not _LLM_SEM.acquire(timeout=40):
+    if not _LLM_SEM.acquire(timeout=8):
         return None
     try:
         reply = _ask_deepseek_locked(messages, url, key, model, temperature, max_tokens, room_code)
@@ -508,19 +619,6 @@ def _ask_deepseek_locked(messages, url, key, model, temperature, max_tokens, roo
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     # 尝试序列：默认参数 → 强制 temperature=1（部分推理模型只接受 1）→ 加大输出上限（推理模型思考消耗大）
     attempts = [(temperature, max_tokens)]
-
-# 异步记忆线程专用调用：抢不到 LLM 配额就放弃（5 秒），绝不阻塞主请求路径
-# （提名决策/投票决策/发言生成等关键请求使用 _ask_deepseek 的 40 秒窗口）
-def _ask_deepseek_async(messages, llm_conf="", temperature=0.3, max_tokens=220, room_code=""):
-    url, key, model = _resolve_llm(llm_conf)
-    if not url or not key:
-        return None
-    if not _LLM_SEM.acquire(timeout=5):
-        return None
-    try:
-        return _ask_deepseek_locked(messages, url, key, model, temperature, max_tokens, room_code)
-    finally:
-        _LLM_SEM.release()
     if abs(temperature - 1.0) > 0.01:
         attempts.append((1.0, max_tokens))
     attempts.append((1.0, max_tokens * 3))
@@ -565,6 +663,19 @@ def _ask_deepseek_async(messages, llm_conf="", temperature=0.3, max_tokens=220, 
                 pass
             return None
     return None
+
+# 异步记忆线程专用调用：抢不到 LLM 配额就放弃（5 秒），绝不阻塞主请求路径
+# （提名决策/投票决策/发言生成等关键请求使用 _ask_deepseek 的 40 秒窗口）
+def _ask_deepseek_async(messages, llm_conf="", temperature=0.3, max_tokens=220, room_code=""):
+    url, key, model = _resolve_llm(llm_conf)
+    if not url or not key:
+        return None
+    if not _LLM_SEM.acquire(timeout=5):
+        return None
+    try:
+        return _ask_deepseek_locked(messages, url, key, model, temperature, max_tokens, room_code)
+    finally:
+        _LLM_SEM.release()
 
 def _real_clues(my_clues):
     """过滤身份/技能通知，只保留真正的查验线索"""
@@ -710,6 +821,7 @@ def api_session_reset():
             keys = [k for k in _AI_NOTES if k[0] == room]
             for k in keys:
                 del _AI_NOTES[k]
+            _DRAMA_BRAINS.pop(room, None)
     return jsonify({"ok": True})
 
 # 提名/投票/处决事件通知：给该房间所有 AI 笔记写入对局事件（AI 据此回应提名动态）
@@ -784,16 +896,6 @@ def api_ping():
 @app.route("/api/speak", methods=["POST"])
 def api_speak():
     d = request.get_json(force=True, silent=True) or {}
-    try:
-        with open("req_debug.log", "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%H:%M:%S')} speak room={d.get('room_code')} role={d.get('role_name')} phase={d.get('phase')}\n")
-    except Exception:
-        pass
-    try:
-        with open("req_debug.log", "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%H:%M:%S')} speak room={d.get('room_code')} role={d.get('role_name')} phase={d.get('phase')} other={d.get('other_num')}\n")
-    except Exception:
-        pass
     role_name = d.get("role_name", "玩家")
     team = d.get("team", "")
     number = d.get("number", "?")
@@ -804,10 +906,16 @@ def api_speak():
     my_clues = d.get("my_clues", []) or []
     llm_conf = d.get("llm_conf", "")
     room_code = d.get("room_code", "default")
+    drama = bool(d.get("drama"))
 
-    _record_observations(room_code, number, context, my_clues, day)
-    _maybe_compress_day(room_code, number, day, llm_conf)
-    notes_str = _notes_text(room_code, number)
+    if drama:
+        # 剧本演绎模式：导演大脑（全场 NPC 一个 AI 扮演）
+        _drama_update(room_code, number, role_name, team, int(number) in alive_nums or False)
+        notes_str = _drama_text(room_code, number, role_name, team, my_clues, phase, d.get("other_num") or 0, context)
+    else:
+        _record_observations(room_code, number, context, my_clues, day)
+        _maybe_compress_day(room_code, number, day, llm_conf)
+        notes_str = _notes_text(room_code, number)
 
     alive_str = ",".join(str(n) for n in alive_nums)
     real_clues = _real_clues(my_clues)
@@ -911,7 +1019,7 @@ def api_speak():
                 mate_note = (
                     f"对方 #{other_num} 是好人，你不认识他。"
                     f"全程扮演你的伪装身份，引导对方踩好人，不泄露任何邪恶信息。"
-                )
+                ) + _EVIL_FORBIDDEN
                 team_logic = _EVIL_PLAYBOOK.get(role_name, "") + "".join(_EVIL_TEAM_RULES) + "".join(_EVIL_FRAUD_TACTICS)
                 style = (
                     f"【私聊】和 #{other_num} 一对一私聊。"
@@ -959,7 +1067,7 @@ def api_speak():
                 "绝对不许承认、不许含糊其辞、不许说任何与邪恶身份沾边的话。"
                 "声称身份和信息时用简短利落的一句话（像'我是图书管理员，我得知#2和#8中有一人是外来者'），"
                 "不要长篇解释、不要主动补充细节——话越多破绽越多。"
-            )
+            ) + _EVIL_FORBIDDEN
         temp = 0.8
 
     # ——— 私聊总结记忆 ———
@@ -1046,25 +1154,28 @@ def api_speak():
     # 善良玩家编造性自曝（"我是爪牙/我是卧底"）：毫无逻辑的幻觉，整条换成安全发言
     if _good_self_expose(reply, team):
         reply = random.choice(_FALLBACK_PUBLIC)
-    _extract_identity_update(room_code, number, reply, team, phase)
-    _add_log(room_code, number, f"我说过[{phase}]：{reply[:150]}", day)
-    # 异步结构化记忆：提炼"怀疑/信任"对象写回笔记（不阻塞回复返回）
-    snap_ctx = [dict(m) for m in context[-8:]]
-    threading.Thread(
-        target=_update_structured_notes,
-        args=(room_code, number, reply, snap_ctx, llm_conf),
-        daemon=True,
-    ).start()
-    # 私聊后异步总结记忆（不阻塞回复返回）
-    if phase == "private_chat":
-        other_n = d.get("other_num") or 0
-        if other_n:
-            snap = [dict(m) for m in context[-8:]]
-            threading.Thread(
-                target=_summarize_private,
-                args=(room_code, number, other_n, snap, llm_conf),
-                daemon=True,
-            ).start()
+    if drama:
+        _drama_record(room_code, number, f"说：{reply[:80]}", day)
+    else:
+        _extract_identity_update(room_code, number, reply, team, phase)
+        _add_log(room_code, number, f"我说过[{phase}]：{reply[:150]}", day)
+        # 异步结构化记忆：提炼"怀疑/信任"对象写回笔记（不阻塞回复返回）
+        snap_ctx = [dict(m) for m in context[-8:]]
+        threading.Thread(
+            target=_update_structured_notes,
+            args=(room_code, number, reply, snap_ctx, llm_conf),
+            daemon=True,
+        ).start()
+        # 私聊后异步总结记忆（不阻塞回复返回）
+        if phase == "private_chat":
+            other_n = d.get("other_num") or 0
+            if other_n:
+                snap = [dict(m) for m in context[-8:]]
+                threading.Thread(
+                    target=_summarize_private,
+                    args=(room_code, number, other_n, snap, llm_conf),
+                    daemon=True,
+                ).start()
     # 私聊收尾检测：模型说完自己想说的、分析完对方的话后自然收尾（如"就聊到这里""暂时相信你"）
     # 带 end_chat 标记 → Go 侧该 AI 对此会话进入沉默权（不再回复，仅思考）
     end_chat = False
@@ -1093,7 +1204,12 @@ def api_decide():
     guide = get_role_guide(role_name)
     if guide:
         guide = "你的角色规范：" + guide
-    notes_str = _notes_text(room_code, self_num)
+    drama = bool(d.get("drama"))
+    if drama:
+        _drama_update(room_code, self_num, role_name, "", self_num in alive_nums)
+        notes_str = _drama_text(room_code, self_num, role_name, "", my_clues, "night", 0, None)
+    else:
+        notes_str = _notes_text(room_code, self_num)
 
     # —— 投票决策：先推理后输出 1(赞成)/2(弃权) ——
     if decision_type == "vote":
@@ -1135,7 +1251,10 @@ def api_decide():
             m = re.match(r"^#?\s*([12])\s*$", line.strip())
             if m:
                 vote_yes = m.group(1) == "1"
-                _add_log(room_code, str(self_num), f"我投票{'赞成' if vote_yes else '弃权'} #{vote_target}，推理：{reply[:80]}")
+                if drama:
+                    _drama_record(room_code, self_num, f"投票{'赞成' if vote_yes else '弃权'} #{vote_target}", 0)
+                else:
+                    _add_log(room_code, str(self_num), f"我投票{'赞成' if vote_yes else '弃权'} #{vote_target}，推理：{reply[:80]}")
                 return jsonify({"vote_yes": vote_yes, "reasoning": reply[:200]})
         for n in reversed(re.findall(r"\d+", reply)):
             if n in ("1", "2"):
@@ -1219,7 +1338,10 @@ def api_decide():
                 break
     if choice in candidates:
         # 推理写进笔记（供后续发言/决策引用）
-        _add_log(room_code, str(self_num), f"我选择 #{choice}，推理：{reply[:80]}")
+        if drama:
+            _drama_record(room_code, self_num, f"选择目标 #{choice}，推理：{reply[:60]}", 0)
+        else:
+            _add_log(room_code, str(self_num), f"我选择 #{choice}，推理：{reply[:80]}")
         return jsonify({"choice": choice, "reasoning": reply[:200]})
     return jsonify({"choice": random.choice(candidates)})
 

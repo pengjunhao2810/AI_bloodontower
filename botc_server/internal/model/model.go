@@ -53,6 +53,8 @@ type Room struct {
 	MaxPlayers int        `gorm:"default:8" json:"max_players"`
 	CreatedAt  time.Time  `json:"created_at"`
 	GameData   string     `gorm:"type:text" json:"-"` // 对局快照 JSON（重启恢复）
+	WatchMode  bool       `gorm:"default:false" json:"watch_mode"` // 电子斗蛐蛐观战模式（房主不占座；重启恢复观战身份）
+	Drama      bool       `gorm:"default:false" json:"drama"`      // 剧本演绎模式：1 真人 + AI 导演扮演全场 NPC
 	Host       User       `gorm:"foreignKey:HostID" json:"-"`
 	Seats      []RoomSeat `gorm:"foreignKey:RoomID" json:"-"`
 }
@@ -115,6 +117,7 @@ type GameLog struct {
 	Actions     string    `json:"-"`                 // 夜晚选择方式日志 JSON（manual/timeout/ai）
 	PrivateMsgs string    `json:"-"`                 // 私聊日志 JSON（仅归档，不对玩家广播）
 	Recap       string    `json:"-"`                 // 赛后 AI 复盘（说书人视角回顾，对局结束异步生成）
+	Stats       string    `json:"-"`                 // 对局质量统计 JSON（处决命中率/发言统计/恶魔伪装度等）
 }
 
 // ForumPost 论坛帖子

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -12,6 +13,29 @@ import (
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+	// dramaRooms：房间级玩法标记（创建房间后可在设置里开关）
+	mu         sync.Mutex
+	dramaRooms map[string]bool
+}
+
+// SetRoomDrama 标记/取消剧本演绎房间（开局时调用；房间销毁时清除）
+func (c *Client) SetRoomDrama(roomCode string, on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dramaRooms == nil {
+		c.dramaRooms = map[string]bool{}
+	}
+	if on {
+		c.dramaRooms[roomCode] = true
+	} else {
+		delete(c.dramaRooms, roomCode)
+	}
+}
+
+func (c *Client) dramaOf(roomCode string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dramaRooms[roomCode]
 }
 
 // New 创建 AI 客户端
@@ -61,6 +85,7 @@ func (c *Client) Speak(req SpeakReq) (string, bool) {
 		"my_clues":      req.MyClues,
 		"llm_conf":      req.LLMConf,
 		"other_num":     req.OtherNum,
+		"drama":         c.dramaOf(req.RoomCode),
 	}
 	var resp struct {
 		Reply   string `json:"reply"`
@@ -127,6 +152,7 @@ func (c *Client) decide(roomCode, roleName, ability string, aliveNums []int, sel
 		"self_num":   selfNum,
 		"my_clues":   clues,
 		"llm_conf":   llmConf,
+		"drama":      c.dramaOf(roomCode),
 	}
 	var resp struct {
 		Choice *int `json:"choice"`
@@ -205,6 +231,7 @@ func (c *Client) DecideVote(roomCode, roleName string, fromNum, targetNum int, a
 		"decision_type": "vote",
 		"vote_from":   fromNum,
 		"vote_target": targetNum,
+		"drama":       c.dramaOf(roomCode),
 	}
 	var resp struct {
 		VoteYes bool `json:"vote_yes"`
@@ -234,24 +261,34 @@ func (c *Client) Usage() map[string]any {
 }
 
 // SessionReset 对局生命周期重置：清空该房间 AI 笔记（开局/结束/踢出时调用）
+// fire-and-forget：异步执行，绝不阻塞房间事件循环（AI 服务慢时曾冻结整个房间 40 秒）
 func (c *Client) SessionReset(roomCode string) {
-	payload := map[string]any{"room_code": roomCode}
-	var out map[string]any
-	_ = c.post("/api/session/reset", payload, &out)
+	go func() {
+		defer func() { _ = recover() }()
+		payload := map[string]any{"room_code": roomCode}
+		var out map[string]any
+		_ = c.post("/api/session/reset", payload, &out)
+	}()
 }
 
-// SessionPhase 阶段切换通知：房主推进阶段时调用，告知该房间 AI 当前阶段
+// SessionPhase 阶段切换通知：房主推进阶段时调用，告知该房间 AI 当前阶段（异步，不阻塞）
 func (c *Client) SessionPhase(roomCode, phase string) {
-	payload := map[string]any{"room_code": roomCode, "phase": phase}
-	var out map[string]any
-	_ = c.post("/api/session/phase", payload, &out)
+	go func() {
+		defer func() { _ = recover() }()
+		payload := map[string]any{"room_code": roomCode, "phase": phase}
+		var out map[string]any
+		_ = c.post("/api/session/phase", payload, &out)
+	}()
 }
 
-// SessionEvent 对局事件通知：提名/辩论/投票/处决发生时写入该房间 AI 笔记
+// SessionEvent 对局事件通知：提名/辩论/投票/处决发生时写入该房间 AI 笔记（异步，不阻塞）
 func (c *Client) SessionEvent(roomCode, event string) {
-	payload := map[string]any{"room_code": roomCode, "event": event}
-	var out map[string]any
-	_ = c.post("/api/session/event", payload, &out)
+	go func() {
+		defer func() { _ = recover() }()
+		payload := map[string]any{"room_code": roomCode, "event": event}
+		var out map[string]any
+		_ = c.post("/api/session/event", payload, &out)
+	}()
 }
 
 func (c *Client) post(path string, payload any, out any) error {
