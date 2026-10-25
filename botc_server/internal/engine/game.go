@@ -49,7 +49,7 @@ type PlayerState struct {
 	IsAI     bool   `json:"is_ai"`
 	AIType   string `json:"ai_type"`
 	AIModel  string `json:"ai_model"` // api 类型 AI 调用的大模型名（对局中对外显示）
-	ChatFrame string `json:"chat_frame,omitempty"` // 聊天框样式（商店购买，真人玩家装备）
+	ChatFrame string `json:"chat_frame,omitempty"` // 聊天框样式（真人玩家）
 	LLMConf  string `json:"-"` // 大模型配置 JSON（api_key/base_url/model，仅 api 类型 AI）
 	Alive    bool   `json:"alive"`
 

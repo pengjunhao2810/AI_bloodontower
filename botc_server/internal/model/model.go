@@ -15,7 +15,7 @@ type User struct {
 	Phone        string    `gorm:"size:30" json:"phone"`
 	Coins        int       `gorm:"default:100" json:"coins"`        // 金币（新用户送 100）
 	Avatar       string    `gorm:"size:50;default:'😀'" json:"avatar"`     // 头像（emoji/预设ID）
-	Title        string    `gorm:"size:50;default:''" json:"title"`  // 荣耀称号（商店购买）
+	Title        string    `gorm:"size:50;default:''" json:"title"`  // 荣耀称号
 	ChatFrame    string    `gorm:"size:30;default:'default'" json:"chat_frame"` // 聊天框样式
 	CreatedAt    time.Time `json:"created_at"`
 	IsOnline     bool      `json:"is_online"`
@@ -31,15 +31,6 @@ type DailyTask struct {
 	Progress int       `json:"progress"`
 	Done     bool      `json:"done"`
 	Claimed  bool      `json:"claimed"` // 是否已领取奖励
-}
-
-// Purchase 商店购买记录（用户×商品，用于校验是否已拥有）
-type Purchase struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
-	UserID   uint   `gorm:"index;not null" json:"user_id"`
-	ItemKey  string `gorm:"size:50;not null" json:"item_key"` // avatar_01/title_xx/frame_xx
-	ItemType string `gorm:"size:20;not null" json:"item_type"` // avatar/title/frame
-	Coins    int    `json:"coins"`
 }
 
 // Room 房间记录（持久层：房间元信息与座位，用于断线恢复）
@@ -120,35 +111,9 @@ type GameLog struct {
 	Stats       string    `json:"-"`                 // 对局质量统计 JSON（处决命中率/发言统计/恶魔伪装度等）
 }
 
-// ForumPost 论坛帖子
-type ForumPost struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	UserID    uint      `gorm:"index;not null" json:"user_id"`
-	Title     string    `gorm:"size:100;not null" json:"title"`
-	Content   string    `gorm:"type:text" json:"content"`
-	Likes     int       `json:"likes"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// ForumReply 论坛回复
-type ForumReply struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	PostID    uint      `gorm:"index;not null" json:"post_id"`
-	UserID    uint      `gorm:"index;not null" json:"user_id"`
-	Content   string    `gorm:"type:text" json:"content"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// ForumLike 帖子点赞记录（防重复点赞）
-type ForumLike struct {
-	ID     uint `gorm:"primaryKey" json:"id"`
-	PostID uint `gorm:"index;not null" json:"post_id"`
-	UserID uint `gorm:"index;not null" json:"user_id"`
-}
-
 // AutoMigrate 建表
 func AutoMigrate(db *gorm.DB) error {
-	return db.AutoMigrate(&User{}, &Room{}, &RoomSeat{}, &GameLog{}, &Friend{}, &DailyTask{}, &Purchase{}, &ForumPost{}, &ForumReply{}, &ForumLike{})
+	return db.AutoMigrate(&User{}, &Room{}, &RoomSeat{}, &GameLog{}, &Friend{}, &DailyTask{})
 }
 
 // TaskProgress 更新每日任务进度（对局/发言时调用）

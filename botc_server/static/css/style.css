@@ -691,7 +691,3 @@ a:hover { color: #97a0e8; }
     gap: 2px;
 }
 
-/* 游戏论坛 */
-.forum-wrap { display: flex; justify-content: center; padding: 24px 16px; height: calc(100% - 54px); overflow-y: auto; }
-.forum-post { padding: 12px 8px; border-bottom: 1px solid #2a2f3c; cursor: pointer; transition: background 0.15s; }
-.forum-post:hover { background: rgba(94,106,210,0.06); }

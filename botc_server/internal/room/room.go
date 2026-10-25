@@ -842,7 +842,7 @@ func (r *Room) onStart(ev Event, reply func(bool, string, map[string]any)) {
 		if s.IsAI && s.AIType == "api" {
 			ps.AIModel = ModelFromLLMConfig(s.LLMConfig)
 		}
-		// 真人玩家聊天框样式（商店装备）
+		// 真人玩家聊天框样式
 		if !s.IsAI && s.UserID != 0 {
 			var u model.User
 			if r.mgr.DB.Select("chat_frame").First(&u, s.UserID).Error == nil {

@@ -158,7 +158,7 @@
             const infoDialog = ref(false);
             const overDialog = ref(false);
             const winner = ref('');
-            // 用户中心：任务/商店/排行榜/公示栏/资料
+            // 用户中心：任务/排行榜/公示栏/资料
             const tasksDialog = ref(false);
             const tasksList = ref([]);
             const tasksCoins = ref(0);
@@ -178,38 +178,6 @@
                     const d = await api.post('/api/tasks/claim', { key });
                     toast('领取成功：+' + d.data.reward + ' 金币', 'success');
                     await loadTasks();
-                    await fetchMe();
-                } catch (e) { toast(e.message, 'error'); }
-            }
-            const shopDialog = ref(false);
-            const shopItems = ref([]);
-            const shopCoins = ref(0);
-            const shopTab = ref('avatar');
-            async function openShop() {
-                shopDialog.value = true;
-                await loadShop();
-            }
-            async function loadShop() {
-                try {
-                    const d = await api.get('/api/shop');
-                    shopItems.value = d.data.items || [];
-                    shopCoins.value = d.data.coins || 0;
-                } catch (e) { toast(e.message, 'error'); }
-            }
-            async function buyItem(item) {
-                try {
-                    const d = await api.post('/api/shop/buy', { item_key: item.key });
-                    shopCoins.value = d.data.coins;
-                    toast('购买成功，已自动装备', 'success');
-                    await loadShop();
-                    await fetchMe();
-                } catch (e) { toast(e.message, 'error'); }
-            }
-            async function equipItem(item) {
-                try {
-                    await api.post('/api/shop/equip', { item_key: item.key });
-                    toast('已装备', 'success');
-                    await loadShop();
                     await fetchMe();
                 } catch (e) { toast(e.message, 'error'); }
             }
@@ -233,66 +201,6 @@
             }
             const profileDialog = ref(false);
             const profileForm = reactive({ username: '', email: '', phone: '' });
-            // 游戏论坛
-            const forumPosts = ref([]);
-            const forumDetail = ref(null);   // {post, replies}
-            const forumNewDialog = ref(false);
-            const forumNewForm = reactive({ title: '', content: '' });
-            const forumReplyText = ref('');
-            async function openForum() {
-                view.value = 'forum';
-                forumDetail.value = null;
-                await loadForum();
-            }
-            async function loadForum() {
-                try {
-                    const d = await api.get('/api/forum');
-                    forumPosts.value = d.data.posts || [];
-                } catch (e) { toast(e.message, 'error'); }
-            }
-            async function openForumPost(id) {
-                try {
-                    const d = await api.get('/api/forum/' + id);
-                    forumDetail.value = { post: d.data.post, replies: d.data.replies || [] };
-                    forumReplyText.value = '';
-                } catch (e) { toast(e.message, 'error'); }
-            }
-            function backForum() {
-                forumDetail.value = null;
-                loadForum();
-            }
-            async function createForumPost() {
-                if (!forumNewForm.title.trim() || !forumNewForm.content.trim()) {
-                    toast('标题和内容不能为空', 'error');
-                    return;
-                }
-                try {
-                    await api.post('/api/forum', { title: forumNewForm.title.trim(), content: forumNewForm.content.trim() });
-                    toast('发帖成功', 'success');
-                    forumNewDialog.value = false;
-                    forumNewForm.title = '';
-                    forumNewForm.content = '';
-                    await loadForum();
-                } catch (e) { toast(e.message, 'error'); }
-            }
-            async function sendForumReply() {
-                if (!forumReplyText.value.trim() || !forumDetail.value) return;
-                try {
-                    await api.post('/api/forum/' + forumDetail.value.post.id + '/reply', { content: forumReplyText.value.trim() });
-                    toast('回复成功', 'success');
-                    await openForumPost(forumDetail.value.post.id);
-                } catch (e) { toast(e.message, 'error'); }
-            }
-            async function toggleForumLike(post) {
-                try {
-                    const d = await api.post('/api/forum/' + post.id + '/like', {});
-                    post.likes = d.data.likes;
-                    post.liked = d.data.liked;
-                    if (forumDetail.value && forumDetail.value.post.id === post.id) {
-                        forumDetail.value.post.likes = d.data.likes;
-                    }
-                } catch (e) { toast(e.message, 'error'); }
-            }
             function openProfile() {
                 if (!user.value) return;
                 profileForm.username = user.value.username || '';
@@ -1846,12 +1754,9 @@
                 doLogin, doLogout, createRoom, createArena, joinRoom: joinRoomByCode,
                 captchaCode, refreshCaptcha, fetchMe,
                 tasksDialog, tasksList, tasksCoins, openTasks, loadTasks, claimTask,
-                shopDialog, shopItems, shopCoins, shopTab, openShop, loadShop, buyItem, equipItem,
                 leaderboardDialog, leaderboard, openLeaderboard,
                 announcementsDialog, announcements, openAnnouncements,
                 profileDialog, profileForm, openProfile, saveProfile,
-                forumPosts, forumDetail, forumNewDialog, forumNewForm, forumReplyText,
-                openForum, loadForum, openForumPost, backForum, createForumPost, sendForumReply, toggleForumLike,
                 watchMode, watchPrivateMsgs, watchStories, arenaRecord, arenaRecordDialog, fetchArenaRecord, closeArenaRecord, exportArenaRecord,
                 dramaMode, setDrama,
                 watchSessions, watchActiveSession, watchActiveMsgs, openWatchSession, watchNameOf,

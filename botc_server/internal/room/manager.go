@@ -301,7 +301,7 @@ type GameMsg struct {
 	Content  string    `json:"content"`
 	System   bool      `json:"system"`
 	AIModel  string    `json:"ai_model,omitempty"`  // AI 发言时显示所调大模型名
-	Frame    string    `json:"frame,omitempty"`     // 发言人聊天框样式（商店装备）
+	Frame    string    `json:"frame,omitempty"`     // 发言人聊天框样式
 	At       time.Time `json:"created_at"`
 }
 
