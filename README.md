@@ -6,6 +6,7 @@
 > 技术栈：Go（游戏主服务）+ Python Flask（AI 推理服务）+ Vue3（前端）
 
 ---
+<img width="795" height="2406" alt="image" src="https://github.com/user-attachments/assets/afb00b7b-b92b-440e-a2d0-56a5572be18e" />
 
 ## 目录
 
