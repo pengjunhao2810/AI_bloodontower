@@ -7,7 +7,7 @@
 
 ---
 
-![系统架构图](docs/architecture.png)
+
 
 ## 目录
 
@@ -71,7 +71,7 @@
 
 ### 对局实现流程（端到端）
 
-<img width="795" height="2406" alt="image" src="https://github.com/user-attachments/assets/3eeb19bc-7ffe-48da-aa2b-4501e674807b" />
+![系统架构图](docs/architecture.png)
 
 ### 状态一致性保障
 
